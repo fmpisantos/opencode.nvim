@@ -476,6 +476,54 @@ local function extract_session_from_prompt(prompt)
     return prompt, session_id
 end
 
+--- Parse streaming JSON output and return current state
+---@param json_lines table Lines of JSON output received so far
+---@return string response_text Current response text
+---@return string|nil error_message Error if any
+---@return boolean is_thinking Whether model is currently thinking
+---@return string|nil current_tool Current tool being executed (if any)
+---@return string|nil tool_status Status of the tool execution
+local function parse_streaming_response(json_lines)
+    local response_parts = {}
+    local error_message = nil
+    local is_thinking = false
+    local current_tool = nil
+    local tool_status = nil
+
+    for _, line in ipairs(json_lines) do
+        if line and line ~= "" then
+            local ok, data = pcall(vim.json.decode, line)
+            if ok and data then
+                if data.type == "error" and data.error then
+                    local err = data.error
+                    error_message = err.data and err.data.message
+                        or err.message
+                        or err.name
+                        or "Unknown error"
+                elseif data.type == "thinking" or (data.part and data.part.type == "thinking") then
+                    is_thinking = true
+                    current_tool = nil
+                elseif data.type == "text" and data.part and data.part.type == "text" then
+                    is_thinking = false
+                    current_tool = nil
+                    table.insert(response_parts, data.part.text or "")
+                elseif data.type == "tool-call" and data.part then
+                    -- Tool is being called
+                    is_thinking = false
+                    current_tool = data.part.toolName or data.part.name or "unknown tool"
+                    tool_status = "calling"
+                elseif data.type == "tool-result" and data.part then
+                    -- Tool finished
+                    current_tool = data.part.toolName or data.part.name or "tool"
+                    tool_status = "completed"
+                end
+            end
+        end
+    end
+
+    return table.concat(response_parts, ""), error_message, is_thinking, current_tool, tool_status
+end
+
 --- Run opencode with session support
 ---@param prompt string The prompt to send
 local function run_opencode(prompt)
@@ -549,19 +597,89 @@ local function run_opencode(prompt)
     local full_header = vim.deepcopy(display_prefix)
     vim.list_extend(full_header, header_lines)
 
-    -- Setup spinner
-    local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
-    local loading_prefix = "Running opencode (" .. agent .. " mode)" .. model_info .. " "
-    local spinner = Spinner.new(buf, loading_prefix, full_header)
-    spinner:start()
-
-    local json_output = {}
+    -- State for streaming updates
+    local json_lines = {}
     local stderr_output = {}
     local system_obj = nil
+    local is_running = true
+    local last_status = ""
+    local spinner_idx = 1
+    local update_timer = nil
+
+    -- Function to update display with current streaming state
+    local function update_display()
+        if not vim.api.nvim_buf_is_valid(buf) then
+            return
+        end
+
+        local response, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
+        local display_lines = vim.deepcopy(full_header)
+
+        if is_running then
+            -- Build status line
+            local status_parts = {}
+            local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
+
+            if is_thinking then
+                table.insert(status_parts, "**Status:** Thinking...")
+            elseif current_tool then
+                if tool_status == "calling" then
+                    table.insert(status_parts, "**Status:** Executing `" .. current_tool .. "`...")
+                else
+                    table.insert(status_parts, "**Status:** Completed `" .. current_tool .. "`")
+                end
+            else
+                table.insert(status_parts, "**Status:** Running" .. model_info)
+            end
+
+            -- Add spinner
+            local spinner_char = SPINNER_FRAMES[spinner_idx]
+            spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
+            status_parts[1] = status_parts[1] .. " " .. spinner_char
+
+            table.insert(display_lines, status_parts[1])
+            table.insert(display_lines, "")
+        end
+
+        if err then
+            table.insert(display_lines, "**Error:** " .. err)
+            append_stderr_block(display_lines, stderr_output)
+        elseif response and response ~= "" then
+            vim.list_extend(display_lines, vim.split(response, "\n", { plain = true }))
+        elseif not is_running then
+            table.insert(display_lines, "No response received.")
+            append_stderr_block(display_lines, stderr_output)
+        end
+
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+
+        -- Auto-scroll to bottom if window is valid
+        local wins = vim.fn.win_findbuf(buf)
+        if #wins > 0 then
+            local line_count = vim.api.nvim_buf_line_count(buf)
+            pcall(vim.api.nvim_win_set_cursor, wins[1], { line_count, 0 })
+        end
+    end
+
+    -- Start periodic display updates for spinner
+    local function start_update_timer()
+        update_timer = vim.fn.timer_start(SPINNER_INTERVAL_MS, function()
+            vim.schedule(function()
+                if is_running then
+                    update_display()
+                    start_update_timer()
+                end
+            end)
+        end)
+    end
 
     local function handle_timeout()
         vim.schedule(function()
-            spinner:stop()
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
             if system_obj then
                 system_obj:kill(9)
             end
@@ -578,18 +696,51 @@ local function run_opencode(prompt)
 
     local function execute()
         vim.fn.timer_start(TIMEOUT_MS, function()
-            handle_timeout()
+            if is_running then
+                handle_timeout()
+            end
         end)
 
-        system_obj = vim.system(cmd, { cwd = nvim_cwd }, function(result)
+        -- Initial display with status
+        vim.schedule(function()
+            update_display()
+            start_update_timer()
+        end)
+
+        -- Use streaming stdout handler
+        system_obj = vim.system(cmd, {
+            cwd = nvim_cwd,
+            stdout = function(err, data)
+                if data then
+                    vim.schedule(function()
+                        -- Parse incoming data line by line
+                        for line in data:gmatch("[^\r\n]+") do
+                            table.insert(json_lines, line)
+                        end
+                        update_display()
+                    end)
+                end
+            end,
+            stderr = function(err, data)
+                if data then
+                    vim.schedule(function()
+                        for line in data:gmatch("[^\r\n]+") do
+                            table.insert(stderr_output, line)
+                        end
+                    end)
+                end
+            end,
+        }, function(result)
             vim.schedule(function()
-                spinner:stop()
+                is_running = false
+                if update_timer then
+                    vim.fn.timer_stop(update_timer)
+                    update_timer = nil
+                end
 
-                json_output = parse_lines(result.stdout)
-                stderr_output = parse_lines(result.stderr)
-
+                -- Final update
+                local response, err = parse_streaming_response(json_lines)
                 local display_lines = vim.deepcopy(full_header)
-                local response, err = parse_opencode_response(json_output)
 
                 if err then
                     table.insert(display_lines, "**Error:** " .. err)
@@ -606,12 +757,12 @@ local function run_opencode(prompt)
                     vim.list_extend(display_lines, vim.split(response, "\n", { plain = true }))
                 end
 
-                -- Update buffer if still valid (even if window is closed, buffer persists)
+                -- Update buffer if still valid
                 if vim.api.nvim_buf_is_valid(buf) then
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 end
 
-                -- Always save session to file (even if buffer was deleted)
+                -- Always save session to file
                 save_session(current_session_id, table.concat(display_lines, "\n"))
             end)
         end)
@@ -623,7 +774,7 @@ local function run_opencode(prompt)
             if success then
                 execute()
             else
-                spinner:stop()
+                is_running = false
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
                     table.insert(display_lines, "Error: Failed to initialize opencode")
@@ -750,6 +901,20 @@ local function get_source_file()
     if vim.fn.filereadable(bufname) == 0 then
         return nil
     end
+
+    -- Convert to path relative to cwd
+    local full_path = vim.fn.fnamemodify(bufname, ":p")
+    local cwd = nvim_cwd
+    if not cwd:match("/$") then
+        cwd = cwd .. "/"
+    end
+
+    -- If the file is under cwd, return relative path
+    if full_path:sub(1, #cwd) == cwd then
+        return full_path:sub(#cwd + 1)
+    end
+
+    -- Otherwise return the original bufname (could be relative already)
     return bufname
 end
 
