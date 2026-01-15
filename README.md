@@ -127,6 +127,7 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 | `:OpenCodeReview` | `:OCReview` | Open review prompt for git revisions |
 | `:OpenCodeCLI` | `:OCCLI` | Toggle the response buffer visibility |
 | `:OpenCodeSessions` | `:OCSessions` | Open session picker to view/manage saved sessions |
+| `:OpenCodeInit` | `:OCInit` | Initialize opencode for the current project (creates AGENTS.md) |
 
 ### Default Keymaps
 
@@ -247,11 +248,10 @@ Use the `#session(<id>)` syntax in prompts to continue existing conversations:
 
 ## 🔧 How It Works
 
-1. **Auto-initialization**: On first use, the plugin runs `opencode agent create` if `AGENTS.md` doesn't exist in your project
-2. **Prompt Processing**: Your prompts are sent to the opencode CLI with the selected model and agent mode
-3. **Streaming Display**: Responses stream in real-time to a vertical split buffer with markdown syntax highlighting
-4. **Persistent Settings**: Model selection and draft content are persisted to `~/.local/share/nvim/opencode/config.json`
-5. **Smart Integration**: The plugin integrates with your current buffer context, allowing seamless file references
+1. **Prompt Processing**: Your prompts are sent to the opencode CLI with the selected model and agent mode
+2. **Streaming Display**: Responses stream in real-time to a vertical split buffer with markdown syntax highlighting
+3. **Persistent Settings**: Model selection and draft content are persisted to `~/.local/share/nvim/opencode/config.json`
+4. **Smart Integration**: The plugin integrates with your current buffer context, allowing seamless file references
 
 ## 🐛 Troubleshooting
 

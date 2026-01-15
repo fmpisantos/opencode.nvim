@@ -203,28 +203,6 @@ end
 -- Helper Functions
 -- =============================================================================
 
-local function has_agents_md()
-    return vim.fn.filereadable(get_cwd() .. "/AGENTS.md") == 1
-end
-
-local function init_opencode(callback)
-    local cwd = get_cwd()
-    vim.system({ "opencode", "agent", "create" }, { cwd = cwd }, function(result)
-        if callback then
-            vim.schedule(function()
-                if result.code ~= 0 then
-                    -- Log error for debugging
-                    local stderr = result.stderr or ""
-                    if stderr ~= "" then
-                        vim.notify("opencode agent create failed: " .. stderr, vim.log.levels.WARN)
-                    end
-                end
-                callback(result.code == 0, result.stderr)
-            end)
-        end
-    end)
-end
-
 --- Create or reuse a response buffer in a vertical split
 ---@param name string Buffer name
 ---@param clear boolean Whether to clear the buffer
@@ -624,9 +602,6 @@ local function run_opencode(prompt)
     local stderr_output = {}
     local system_obj = nil
     local is_running = true
-    local is_initializing = false
-    local init_message = nil
-    local init_start_time = nil
     local run_start_time = nil
     local spinner_idx = 1
     local update_timer = nil
@@ -643,27 +618,6 @@ local function run_opencode(prompt)
         -- Add spinner
         local spinner_char = SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
-
-        if is_initializing then
-            local elapsed = ""
-            if init_start_time then
-                local seconds = math.floor((vim.loop.now() - init_start_time) / 1000)
-                elapsed = " (" .. seconds .. "s)"
-            end
-            table.insert(display_lines, "**Status:** Initializing opencode" .. elapsed .. " " .. spinner_char)
-            table.insert(display_lines, "")
-            if init_message then
-                table.insert(display_lines, init_message)
-                table.insert(display_lines, "")
-            end
-            table.insert(display_lines, "_Creating AGENTS.md in your project directory..._")
-            table.insert(display_lines, "_Running:_ `opencode agent create`")
-            table.insert(display_lines, "")
-            table.insert(display_lines, "This is a one-time setup that configures opencode for your project.")
-            table.insert(display_lines, "It may take a moment on first run.")
-            vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-            return
-        end
 
         local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
 
@@ -746,8 +700,7 @@ local function run_opencode(prompt)
     end
 
     local function execute()
-        -- Clear initializing state and start run timer
-        is_initializing = false
+        -- Start run timer
         run_start_time = vim.loop.now()
 
         vim.fn.timer_start(TIMEOUT_MS, function()
@@ -817,46 +770,10 @@ local function run_opencode(prompt)
         end)
     end
 
-    -- Check if we need to init first
-    if not has_agents_md() then
-        -- Set initializing state and start spinner
-        is_initializing = true
-        init_start_time = vim.loop.now()
-        update_display()
-        start_update_timer()
-
-        init_opencode(function(success, stderr)
-            if success then
-                execute()
-            else
-                is_running = false
-                is_initializing = false
-                if update_timer then
-                    vim.fn.timer_stop(update_timer)
-                    update_timer = nil
-                end
-                if vim.api.nvim_buf_is_valid(buf) then
-                    local display_lines = vim.deepcopy(full_header)
-                    table.insert(display_lines, "**Error:** Failed to initialize opencode")
-                    if stderr and stderr ~= "" then
-                        table.insert(display_lines, "")
-                        table.insert(display_lines, "```")
-                        table.insert(display_lines, stderr)
-                        table.insert(display_lines, "```")
-                    end
-                    table.insert(display_lines, "")
-                    table.insert(display_lines, "Make sure the `opencode` CLI is installed and in your PATH.")
-                    table.insert(display_lines, "Try running `opencode agent create` manually in your project directory.")
-                    vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-                end
-            end
-        end)
-    else
-        -- Start spinner and execute immediately
-        update_display()
-        start_update_timer()
-        execute()
-    end
+    -- Start spinner and execute immediately
+    update_display()
+    start_update_timer()
+    execute()
 end
 
 -- =============================================================================
@@ -881,7 +798,7 @@ local function run_opencode_command(command, args)
 
     local function execute()
         local cmd = build_opencode_cmd(
-            { "opencode", "run", "--command", command, "--format", "json" },
+            { "opencode", "run", "--agent", "build", "--format", "json", "--command", command },
             (args and args ~= "") and args or nil
         )
 
@@ -918,20 +835,7 @@ local function run_opencode_command(command, args)
         end)
     end
 
-    if not has_agents_md() then
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Initializing opencode...", "" })
-        init_opencode(function(success)
-            if success then
-                execute()
-            elseif vim.api.nvim_buf_is_valid(buf) then
-                vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-                    "Error: Failed to initialize opencode",
-                })
-            end
-        end)
-    else
-        execute()
-    end
+    execute()
 end
 
 -- =============================================================================
@@ -1371,6 +1275,11 @@ M.ToggleCLI = function()
     toggle_response_buffer()
 end
 
+--- Initialize opencode project (runs init command)
+M.Init = function()
+    run_opencode_command("init", nil)
+end
+
 -- =============================================================================
 -- Commands & Keymaps
 -- =============================================================================
@@ -1430,6 +1339,14 @@ local function setup_commands()
     end, { nargs = 0 })
     vim.api.nvim_create_user_command("OCSessions", function()
         M.SelectSession()
+    end, { nargs = 0 })
+
+    -- Init (runs /init command)
+    vim.api.nvim_create_user_command("OpenCodeInit", function()
+        M.Init()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCInit", function()
+        M.Init()
     end, { nargs = 0 })
 end
 
