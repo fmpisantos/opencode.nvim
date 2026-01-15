@@ -2,50 +2,120 @@
 
 A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, allowing you to interact with AI coding assistants directly from your editor.
 
-## Features
+## ✨ Features
 
-- **Prompt Window**: Open a floating window to send prompts to the AI assistant
-- **Code Selection**: Include visual selections in your prompts (automatically wrapped in markdown code fences)
-- **Agent Modes**: Switch between `build` mode (code generation) and `plan` mode (task planning) using `#plan` in your prompt
-- **Model Selection**: Choose AI models via Telescope picker, with persistence across sessions
-- **Code Review**: Review git changes with AI using various revision formats (commits, branches, tags)
-- **Streaming Responses**: Real-time response display in a vertical split with markdown highlighting
+- **🪟 Floating Prompt Window**: Clean, centered floating window for sending prompts to AI assistants
+- **📝 Visual Selection Support**: Include code selections in your prompts (automatically wrapped in markdown code fences)
+- **🤖 Dual Agent Modes**: 
+  - `build` mode - Code generation and implementation (default)
+  - `plan` mode - Task planning and strategizing
+- **🎯 Model Selection**: Choose from available AI models via Telescope picker with persistent preferences
+- **🔍 Git Review Integration**: Review commits, branches, and diffs with AI assistance
+- **⚡ Streaming Responses**: Real-time response display with markdown syntax highlighting
+- **📂 File References**: Use `@` trigger to quickly reference files in your prompts
+- **💾 Draft Persistence**: Unsaved prompts are preserved when closing the prompt window
 
-## Requirements
+## 📋 Requirements
 
-- Neovim 0.9+
-- [opencode](https://opencode.ai) CLI installed and available in PATH
-- [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (for model selection)
+- Neovim 0.9+ (0.10+ recommended for best experience)
+- [opencode](https://opencode.ai) CLI tool installed and available in PATH
+- [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) - For model selection and file references
 
-## Installation
+## 📦 Installation
 
-Using [lazy.nvim](https://github.com/folke/lazy.nvim):
+### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
 {
   "fmpisantos/opencode.nvim",
   dependencies = {
     "nvim-telescope/telescope.nvim",
+    "nvim-telescope/telescope-ui-select.nvim",
+    "nvim-telescope/telescope-fzf-native.nvim",
+    "nvim-lua/plenary.nvim",
   },
   config = function()
-    require("opencode")
+    require("opencode").setup()
   end,
 }
 ```
 
-Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
+### Using [packer.nvim](https://github.com/wbthomason/packer.nvim)
 
 ```lua
 use {
   "fmpisantos/opencode.nvim",
-  requires = { "nvim-telescope/telescope.nvim" },
+  requires = {
+    "nvim-telescope/telescope.nvim",
+    "nvim-telescope/telescope-ui-select.nvim",
+    "nvim-telescope/telescope-fzf-native.nvim",
+    "nvim-lua/plenary.nvim",
+  },
   config = function()
-    require("opencode")
+    require("opencode").setup()
   end,
 }
 ```
 
-## Usage
+### Using [pack.nvim](https://github.com/fmpisantos/pack.nvim)
+
+```lua
+return {
+  src = "fmpisantos/opencode.nvim",
+  deps = {
+    "nvim-telescope/telescope.nvim",
+    "nvim-telescope/telescope-ui-select.nvim",
+    "nvim-telescope/telescope-fzf-native.nvim",
+    "nvim-lua/plenary.nvim",
+  },
+  setup = function()
+    require("opencode").setup()
+  end,
+}
+```
+
+## ⚙️ Configuration
+
+The plugin works out of the box with sensible defaults. Customize by passing options to `setup()`:
+
+```lua
+require("opencode").setup({
+  -- Window dimensions
+  prompt_window = {
+    width = 60,   -- Width of the prompt floating window
+    height = 10,  -- Height of the prompt floating window
+  },
+  review_window = {
+    width = 60,   -- Width of the review floating window
+    height = 8,   -- Height of the review floating window
+  },
+  -- Keymaps
+  keymaps = {
+    enable_default = true,            -- Set to false to disable default keymaps
+    open_prompt = "<leader>oc",       -- Keymap to open prompt window
+  },
+})
+```
+
+### Custom Keymap Example
+
+If you want to disable default keymaps and set your own:
+
+```lua
+require("opencode").setup({
+  keymaps = {
+    enable_default = false,  -- Disable default <leader>oc keymap
+  },
+})
+
+-- Set your own keymaps
+vim.keymap.set("n", "<leader>ai", "<Cmd>OpenCode<CR>", { desc = "Open OpenCode" })
+vim.keymap.set("v", "<leader>ai", "<Cmd>OpenCodeWSelection<CR>", { desc = "OpenCode with selection" })
+vim.keymap.set("n", "<leader>am", "<Cmd>OpenCodeModel<CR>", { desc = "Select AI model" })
+vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review git changes" })
+```
+
+## 🚀 Usage
 
 ### Commands
 
@@ -63,34 +133,136 @@ use {
 | Normal | `<leader>oc` | Open prompt window |
 | Visual | `<leader>oc` | Open prompt with selection |
 
+**Note**: You can disable default keymaps by setting `keymaps.enable_default = false` in setup.
+
 ### Prompt Window Keybindings
 
-- `:w` or `:wq` - Submit the prompt
-- `q` or `<Esc>` - Close without submitting
+Inside the OpenCode prompt window:
+
+| Key | Action |
+|-----|--------|
+| `:w` or `:wq` | Submit the prompt to AI |
+| `q` or `<Esc>` | Close without submitting (saves draft) |
+| `@` | Trigger Telescope file picker to insert file reference |
+| `<Space>` (after `#buffer` or `#buf`) | Auto-expand to current file path |
 
 ### Special Markers
 
 Use these markers in your prompts for additional functionality:
 
-- `#plan` - Switch to plan mode for task planning
-- `#buffer` or `#buf` - Reference the current file
+| Marker | Description | Example |
+|--------|-------------|---------|
+| `#plan` | Switch to plan mode for task planning | `#plan How should I architect this feature?` |
+| `#buffer` or `#buf` | Reference the current file | `Refactor #buffer to use async/await` |
+| `@` (in prompt) | Opens file picker to reference any file | Type `@` then select file from Telescope |
 
 ### Code Review
 
 The `:OpenCodeReview` command accepts various git revision formats:
 
-- `HEAD~3` - Last 3 commits
-- `abc123` - Specific commit hash
-- `main..feature` - Branch comparison
-- `v1.0.0` - Tag reference
+| Format | Description | Example |
+|--------|-------------|---------|
+| `HEAD~N` | Last N commits | `HEAD~3` - Last 3 commits |
+| `<hash>` | Specific commit | `abc123` - Review commit abc123 |
+| `<ref>..<ref>` | Range comparison | `main..feature` - Compare branches |
+| `<tag>` | Tag reference | `v1.0.0` - Review tag v1.0.0 |
+| Empty | Default review | Leave empty for current changes |
 
-## How It Works
+### Usage Examples
 
-1. On first use, the plugin automatically initializes opencode by running `opencode agent create` if `AGENTS.md` doesn't exist in your project
-2. Prompts are sent to the opencode CLI with the selected model and agent mode
-3. Responses are streamed in real-time to a vertical split buffer with markdown syntax highlighting
-4. Model selection is persisted to `~/.local/share/nvim/opencode/config.json`
+**Basic prompt:**
+```
+# In normal mode, press <leader>oc
+Write a function to validate email addresses
+```
 
-## License
+**With code selection:**
+```lua
+-- Select this code in visual mode, then press <leader>oc
+function process_data(items)
+  -- Your implementation
+end
+```
+Then in the prompt window:
+```
+Optimize this function for large datasets
+```
+
+**Using plan mode:**
+```
+#plan Create a test suite for the authentication module
+```
+
+**Referencing current file:**
+```
+Add error handling to #buffer
+```
+
+**Referencing multiple files:**
+```
+Refactor @src/utils.lua and @src/helpers.lua to reduce duplication
+```
+*(Use `@` to trigger file picker for each file)*
+
+**Git review:**
+```vim
+:OpenCodeReview
+# In the review window, enter:
+HEAD~5
+```
+The AI will review your last 5 commits and provide feedback.
+
+## 🔧 How It Works
+
+1. **Auto-initialization**: On first use, the plugin runs `opencode agent create` if `AGENTS.md` doesn't exist in your project
+2. **Prompt Processing**: Your prompts are sent to the opencode CLI with the selected model and agent mode
+3. **Streaming Display**: Responses stream in real-time to a vertical split buffer with markdown syntax highlighting
+4. **Persistent Settings**: Model selection and draft content are persisted to `~/.local/share/nvim/opencode/config.json`
+5. **Smart Integration**: The plugin integrates with your current buffer context, allowing seamless file references
+
+## 🐛 Troubleshooting
+
+### Plugin doesn't load
+
+Make sure you've called `setup()` in your plugin configuration:
+```lua
+require("opencode").setup()
+```
+
+### "opencode command not found"
+
+Ensure the opencode CLI is installed and in your PATH:
+```bash
+# Check if opencode is available
+which opencode
+
+# If not, install from https://opencode.ai
+```
+
+### Telescope not working
+
+Make sure telescope.nvim and its dependencies are installed and loaded before opencode.nvim.
+
+### File references (@) not working
+
+The `@` trigger requires telescope.nvim to be properly configured. Verify it's in your dependencies.
+
+### Keymaps not working
+
+If default keymaps aren't working:
+1. Check if another plugin is using `<leader>oc`
+2. Try setting a custom keymap in configuration
+3. Verify `keymaps.enable_default` is not set to `false`
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+## 📄 License
 
 MIT
+
+## 🔗 Links
+
+- [opencode CLI](https://opencode.ai) - The AI coding assistant CLI tool
+- [Issue Tracker](https://github.com/fmpisantos/opencode.nvim/issues) - Report bugs or request features

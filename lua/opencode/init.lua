@@ -9,6 +9,27 @@ local TIMEOUT_MS = 120000 -- 2 minutes
 local SPINNER_INTERVAL_MS = 80
 
 -- =============================================================================
+-- Default Configuration
+-- =============================================================================
+
+local default_config = {
+    -- Window dimensions
+    prompt_window = {
+        width = 60,
+        height = 10,
+    },
+    review_window = {
+        width = 60,
+        height = 8,
+    },
+    -- Keymaps
+    keymaps = {
+        enable_default = true,
+        open_prompt = "<leader>oc",
+    },
+}
+
+-- =============================================================================
 -- State
 -- =============================================================================
 
@@ -18,6 +39,8 @@ local config_file = config_dir .. "/config.json"
 local selected_model = nil
 local draft_content = nil
 local draft_cursor = nil
+local user_config = vim.deepcopy(default_config)
+local is_initialized = false
 
 -- =============================================================================
 -- Config Management
@@ -476,8 +499,8 @@ M.OpenCode = function(initial_prompt, filetype, source_file)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
 
     local buf, win = create_floating_window({
-        width = 60,
-        height = 10,
+        width = user_config.prompt_window.width,
+        height = user_config.prompt_window.height,
         title = get_window_title(nil),
         filetype = "opencode",
         name = "OpenCode Prompt",
@@ -577,8 +600,8 @@ M.OpenCodeReview = function()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
 
     local buf, win = create_floating_window({
-        width = 60,
-        height = 8,
+        width = user_config.review_window.width,
+        height = user_config.review_window.height,
         title = " OpenCode Review [" .. get_model_display() .. "] ",
         filetype = "opencode",
         name = "OpenCode Review",
@@ -677,34 +700,66 @@ end
 -- Commands & Keymaps
 -- =============================================================================
 
-vim.api.nvim_create_user_command("OpenCode", function()
-    M.OpenCode(nil, nil, get_source_file())
-end, { nargs = 0 })
+local function setup_commands()
+    vim.api.nvim_create_user_command("OpenCode", function()
+        M.OpenCode(nil, nil, get_source_file())
+    end, { nargs = 0 })
 
-vim.api.nvim_create_user_command("OpenCodeWSelection", function()
-    local source_file = get_source_file()
-    local mode = vim.fn.mode()
+    vim.api.nvim_create_user_command("OpenCodeWSelection", function()
+        local source_file = get_source_file()
+        local mode = vim.fn.mode()
 
-    if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
-        M.OpenCode(nil, nil, source_file)
+        if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
+            M.OpenCode(nil, nil, source_file)
+            return
+        end
+
+        local start_pos = vim.fn.getpos("v")
+        local end_pos = vim.fn.getpos(".")
+        local selection_lines = vim.fn.getregion(start_pos, end_pos, { type = mode })
+        M.OpenCode(selection_lines, vim.bo.filetype, source_file)
+    end, { nargs = 0 })
+
+    vim.api.nvim_create_user_command("OpenCodeModel", function()
+        M.SelectModel()
+    end, { nargs = 0 })
+
+    vim.api.nvim_create_user_command("OpenCodeReview", function()
+        M.OpenCodeReview()
+    end, { nargs = 0 })
+end
+
+local function setup_keymaps()
+    if not user_config.keymaps.enable_default then
         return
     end
 
-    local start_pos = vim.fn.getpos("v")
-    local end_pos = vim.fn.getpos(".")
-    local selection_lines = vim.fn.getregion(start_pos, end_pos, { type = mode })
-    M.OpenCode(selection_lines, vim.bo.filetype, source_file)
-end, { nargs = 0 })
+    local keymap = user_config.keymaps.open_prompt
+    vim.keymap.set("n", keymap, "<Cmd>OpenCode<CR>", { noremap = true, silent = true, desc = "Open OpenCode prompt" })
+    vim.keymap.set("v", keymap, "<Cmd>OpenCodeWSelection<CR>", { noremap = true, silent = true, desc = "Open OpenCode with selection" })
+end
 
-vim.api.nvim_create_user_command("OpenCodeModel", function()
-    M.SelectModel()
-end, { nargs = 0 })
+-- =============================================================================
+-- Setup
+-- =============================================================================
 
-vim.api.nvim_create_user_command("OpenCodeReview", function()
-    M.OpenCodeReview()
-end, { nargs = 0 })
+--- Setup the opencode plugin
+---@param opts? table User configuration options
+function M.setup(opts)
+    if is_initialized then
+        return
+    end
 
-vim.keymap.set("n", "<leader>oc", "<Cmd>OpenCode<CR>", { noremap = true, silent = true })
-vim.keymap.set("v", "<leader>oc", "<Cmd>OpenCodeWSelection<CR>", { noremap = true, silent = true })
+    -- Merge user config with defaults
+    if opts then
+        user_config = vim.tbl_deep_extend("force", default_config, opts)
+    end
+
+    -- Initialize commands and keymaps
+    setup_commands()
+    setup_keymaps()
+
+    is_initialized = true
+end
 
 return M
