@@ -5,7 +5,6 @@ local M = {}
 -- =============================================================================
 
 local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
-local TIMEOUT_MS = 120000 -- 2 minutes
 local SPINNER_INTERVAL_MS = 80
 local SESSION_SEPARATOR = "\n\n===============================================================================\n\n"
 local NEW_SESSION_LABEL = "(New Session)"
@@ -28,6 +27,8 @@ local default_config = {
     response_buffer = {
         wrap = true, -- Enable line wrapping in response buffer
     },
+    -- Timeout in milliseconds (default 2 minutes)
+    timeout_ms = 120000,
     -- Keymaps
     keymaps = {
         enable_default = true,
@@ -477,6 +478,48 @@ local function extract_session_from_prompt(prompt)
     return prompt, session_id
 end
 
+--- Format todo items into display lines
+---@param todos table Array of todo items { id, content, status, priority }
+---@return table lines Formatted display lines
+local function format_todo_list(todos)
+    if not todos or #todos == 0 then
+        return {}
+    end
+
+    local lines = {}
+    table.insert(lines, "")
+    table.insert(lines, "---")
+    table.insert(lines, "**Todo List:**")
+    table.insert(lines, "")
+
+    -- Status icons
+    local status_icons = {
+        pending = "[ ]",
+        in_progress = "[~]",
+        completed = "[x]",
+        cancelled = "[-]",
+    }
+
+    -- Priority indicators
+    local priority_markers = {
+        high = "!!!",
+        medium = "!!",
+        low = "!",
+    }
+
+    for _, todo in ipairs(todos) do
+        local icon = status_icons[todo.status] or "[ ]"
+        local priority = priority_markers[todo.priority] or ""
+        local line = string.format("%s %s %s", icon, todo.content or "", priority)
+        table.insert(lines, line)
+    end
+
+    table.insert(lines, "---")
+    table.insert(lines, "")
+
+    return lines
+end
+
 --- Parse streaming JSON output and return current state
 ---@param json_lines table Lines of JSON output received so far
 ---@return table response_lines Lines of response text
@@ -485,6 +528,7 @@ end
 ---@return string|nil current_tool Current tool being executed (if any)
 ---@return string|nil tool_status Status of the tool execution
 ---@return string|nil cli_session_id The CLI session ID from opencode
+---@return table|nil todos Current todo list (if any)
 local function parse_streaming_response(json_lines)
     local response_lines = {}
     local error_message = nil
@@ -492,6 +536,7 @@ local function parse_streaming_response(json_lines)
     local current_tool = nil
     local tool_status = nil
     local cli_session_id = nil
+    local todos = nil
 
     for _, line in ipairs(json_lines) do
         if line and line ~= "" then
@@ -520,13 +565,25 @@ local function parse_streaming_response(json_lines)
                     for _, text_line in ipairs(text_lines) do
                         table.insert(response_lines, text_line)
                     end
+                elseif data.type == "tool_use" and data.part then
+                    -- Tool use event (includes tool name and state)
+                    is_thinking = false
+                    current_tool = data.part.tool or "unknown tool"
+                    local state = data.part.state
+                    if state then
+                        tool_status = state.status or "running"
+                        -- Capture todo list from todowrite tool
+                        if data.part.tool == "todowrite" and state.input and state.input.todos then
+                            todos = state.input.todos
+                        end
+                    end
                 elseif data.type == "tool-call" and data.part then
-                    -- Tool is being called
+                    -- Tool is being called (legacy format)
                     is_thinking = false
                     current_tool = data.part.toolName or data.part.name or "unknown tool"
                     tool_status = "calling"
                 elseif data.type == "tool-result" and data.part then
-                    -- Tool finished
+                    -- Tool finished (legacy format)
                     current_tool = data.part.toolName or data.part.name or "tool"
                     tool_status = "completed"
                 end
@@ -534,7 +591,7 @@ local function parse_streaming_response(json_lines)
         end
     end
 
-    return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id
+    return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id, todos
 end
 
 --- Run opencode with session support
@@ -632,7 +689,7 @@ local function run_opencode(prompt)
         local spinner_char = SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
 
-        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = parse_streaming_response(json_lines)
+        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = parse_streaming_response(json_lines)
 
         -- Capture CLI session ID if we don't have one yet
         if new_cli_session_id and not current_session_id then
@@ -652,7 +709,7 @@ local function run_opencode(prompt)
             if is_thinking then
                 status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
             elseif current_tool then
-                if tool_status == "calling" then
+                if tool_status == "calling" or tool_status == "running" then
                     status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
                 else
                     status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
@@ -663,6 +720,11 @@ local function run_opencode(prompt)
 
             table.insert(display_lines, status_text)
             table.insert(display_lines, "")
+        end
+
+        -- Add todo list if present
+        if todos and #todos > 0 then
+            vim.list_extend(display_lines, format_todo_list(todos))
         end
 
         if err then
@@ -709,7 +771,7 @@ local function run_opencode(prompt)
             end
             if vim.api.nvim_buf_is_valid(buf) then
                 local display_lines = vim.deepcopy(full_header)
-                table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
+                table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(user_config.timeout_ms / 1000) .. " seconds")
                 append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 -- Save session even on timeout (only if we have a session ID)
@@ -724,7 +786,7 @@ local function run_opencode(prompt)
         -- Start run timer
         run_start_time = vim.loop.now()
 
-        vim.fn.timer_start(TIMEOUT_MS, function()
+        vim.fn.timer_start(user_config.timeout_ms, function()
             if is_running then
                 handle_timeout()
             end
@@ -809,27 +871,35 @@ end
 -- Run OpenCode Command (slash commands)
 -- =============================================================================
 
-local function run_opencode_command(command, args)
-    -- Clear session for new command (session ID will be set when we get it from CLI)
-    current_session_id = nil
-    current_session_name = nil
+local function run_opencode_command(command, args, session_id)
+    -- Use provided session_id or clear session for new command
+    if session_id then
+        current_session_id = session_id
+        current_session_name = nil
+    else
+        current_session_id = nil
+        current_session_name = nil
+    end
 
     local buf, _ = create_response_split("OpenCode Response", true)
 
-    -- Build command
-    local cmd = build_opencode_cmd(
-        { "opencode", "run", "--agent", "build", "--format", "json", "--command", command },
-        (args and args ~= "") and args or nil
-    )
+    -- Build command with optional session
+    local base_cmd = { "opencode", "run", "--agent", "build", "--format", "json", "--command", command }
+    if session_id then
+        table.insert(base_cmd, "--session")
+        table.insert(base_cmd, session_id)
+    end
+    local cmd = build_opencode_cmd(base_cmd, (args and args ~= "") and args or nil)
 
     -- Build header
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local args_display = (args and args ~= "") and (" " .. args) or ""
+    local session_display = session_id and (" [session: " .. session_id:sub(1, 15) .. "...]") or ""
     local cmd_display = table.concat(cmd, " ")
     local header_lines = {
         "**Command:** `" .. cmd_display .. "`",
         "",
-        "**Running:** `/" .. command .. "`" .. args_display .. model_info,
+        "**Running:** `/" .. command .. "`" .. args_display .. model_info .. session_display,
         "",
         "---",
         "",
@@ -933,7 +1003,7 @@ local function run_opencode_command(command, args)
             end
             if vim.api.nvim_buf_is_valid(buf) then
                 local display_lines = vim.deepcopy(header_lines)
-                table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
+                table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(user_config.timeout_ms / 1000) .. " seconds")
                 append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 if current_session_id then
@@ -944,7 +1014,7 @@ local function run_opencode_command(command, args)
     end
 
     -- Start timeout timer
-    vim.fn.timer_start(TIMEOUT_MS, function()
+    vim.fn.timer_start(user_config.timeout_ms, function()
         if is_running then
             handle_timeout()
         end
@@ -1162,7 +1232,7 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
     vim.cmd("startinsert")
 
-    -- Update title on content change and handle #session trigger
+    -- Update title on content change and handle #session and #undo triggers
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
         buffer = buf,
         callback = function()
@@ -1172,6 +1242,31 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
             local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
             local content = table.concat(lines, "\n")
+
+            -- Check for #undo trigger - requires an associated session
+            if content:match("#undo%s*$") or content:match("#undo[%s\n]") then
+                -- Extract session ID from content if present
+                local undo_session_id = content:match("#session%(([^)]+)%)") or session_to_use
+                if undo_session_id then
+                    -- Close prompt window and run undo command
+                    draft_content = nil
+                    draft_cursor = nil
+                    vim.api.nvim_win_close(win, true)
+                    run_opencode_command("undo", nil, undo_session_id)
+                    return
+                else
+                    -- No session ID available, notify user
+                    vim.notify("Cannot undo: no session ID associated. Use #session first.", vim.log.levels.WARN)
+                    -- Remove #undo from content
+                    local new_lines = {}
+                    for _, line in ipairs(lines) do
+                        local new_line = line:gsub("#undo%s*$", ""):gsub("#undo([%s\n])", "%1")
+                        table.insert(new_lines, new_line)
+                    end
+                    vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
+                    return
+                end
+            end
 
             -- Check for #session trigger (without parentheses - user wants to pick a session)
             if content:match("#session%s*$") or content:match("#session[%s\n]") then
@@ -1292,7 +1387,7 @@ M.OpenCodeReview = function()
         end):totable()
         local args = vim.trim(table.concat(input_lines, " "))
         vim.api.nvim_win_close(win, true)
-        run_opencode_command("/review", args)
+        run_opencode_command("review", args)
     end
 
     vim.api.nvim_create_autocmd("BufWriteCmd", {
