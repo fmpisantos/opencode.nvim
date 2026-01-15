@@ -108,12 +108,6 @@ local function get_project_session_dir()
     return sessions_dir .. "/" .. safe_path
 end
 
---- Generate a unique session ID
----@return string
-local function generate_session_id()
-    return os.date("%Y%m%d_%H%M%S") .. "_" .. math.random(1000, 9999)
-end
-
 --- Get session file path
 ---@param session_id string
 ---@return string
@@ -185,9 +179,9 @@ local function list_sessions()
     return sessions
 end
 
---- Start a new session
+--- Start a new session (session ID will be set when we get it from CLI)
 local function start_new_session()
-    current_session_id = generate_session_id()
+    current_session_id = nil
     current_session_name = nil
 end
 
@@ -490,17 +484,24 @@ end
 ---@return boolean is_thinking Whether model is currently thinking
 ---@return string|nil current_tool Current tool being executed (if any)
 ---@return string|nil tool_status Status of the tool execution
+---@return string|nil cli_session_id The CLI session ID from opencode
 local function parse_streaming_response(json_lines)
     local response_lines = {}
     local error_message = nil
     local is_thinking = false
     local current_tool = nil
     local tool_status = nil
+    local cli_session_id = nil
 
     for _, line in ipairs(json_lines) do
         if line and line ~= "" then
             local ok, data = pcall(vim.json.decode, line)
             if ok and data then
+                -- Capture CLI session ID from any message
+                if data.sessionID and not cli_session_id then
+                    cli_session_id = data.sessionID
+                end
+
                 if data.type == "error" and data.error then
                     local err = data.error
                     error_message = err.data and err.data.message
@@ -533,7 +534,7 @@ local function parse_streaming_response(json_lines)
         end
     end
 
-    return response_lines, error_message, is_thinking, current_tool, tool_status
+    return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id
 end
 
 --- Run opencode with session support
@@ -543,12 +544,12 @@ local function run_opencode(prompt)
         return
     end
 
-    -- Extract session id from prompt if present
-    local session_id
-    prompt, session_id = extract_session_from_prompt(prompt)
+    -- Extract CLI session id from prompt if present (for continuation)
+    local cli_session_id
+    prompt, cli_session_id = extract_session_from_prompt(prompt)
 
     -- Determine if this is a continuation of an existing session
-    local is_continuation = session_id ~= nil
+    local is_continuation = cli_session_id ~= nil
 
     -- Determine agent mode
     local agent = "build"
@@ -557,19 +558,17 @@ local function run_opencode(prompt)
         prompt = prompt:gsub("#plan%s*", ""):gsub("%s*#plan", "")
     end
 
-    -- Set or create session
-    if session_id then
-        current_session_id = session_id
-        current_session_name = nil -- Will be updated from loaded content
-    elseif not current_session_id then
-        start_new_session()
+    -- Set current session if continuing
+    if cli_session_id then
+        current_session_id = cli_session_id
+        current_session_name = nil
     end
 
     -- Get existing content if continuing
     local existing_content = {}
-    if is_continuation then
+    if is_continuation and cli_session_id then
         -- Load from file if we have a session id
-        local saved_content = load_session(session_id)
+        local saved_content = load_session(cli_session_id)
         if saved_content then
             existing_content = vim.split(saved_content, "\n", { plain = true })
         elseif response_buf and vim.api.nvim_buf_is_valid(response_buf) then
@@ -579,14 +578,14 @@ local function run_opencode(prompt)
 
     local buf, _ = create_response_split("OpenCode Response", not is_continuation)
 
-    -- Update buffer's session id
+    -- Update buffer's session id (may be nil for new sessions until we get it from CLI)
     vim.b[buf].opencode_session_id = current_session_id
 
-    -- Build command with session support
+    -- Build command with --session flag if continuing
     local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
-    if session_id then
+    if cli_session_id then
         table.insert(base_cmd, "--session")
-        table.insert(base_cmd, session_id)
+        table.insert(base_cmd, cli_session_id)
     end
     local cmd = build_opencode_cmd(base_cmd, prompt)
 
@@ -633,7 +632,13 @@ local function run_opencode(prompt)
         local spinner_char = SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
 
-        local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
+        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = parse_streaming_response(json_lines)
+
+        -- Capture CLI session ID if we don't have one yet
+        if new_cli_session_id and not current_session_id then
+            current_session_id = new_cli_session_id
+            vim.b[buf].opencode_session_id = current_session_id
+        end
 
         if is_running then
             -- Build status line with elapsed time
@@ -707,8 +712,10 @@ local function run_opencode(prompt)
                 table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
                 append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-                -- Save session even on timeout
-                save_session(current_session_id, table.concat(display_lines, "\n"))
+                -- Save session even on timeout (only if we have a session ID)
+                if current_session_id then
+                    save_session(current_session_id, table.concat(display_lines, "\n"))
+                end
             end
         end)
     end
@@ -755,8 +762,14 @@ local function run_opencode(prompt)
                 end
 
                 -- Final update
-                local response_lines, err = parse_streaming_response(json_lines)
+                local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
                 local display_lines = vim.deepcopy(full_header)
+
+                -- Ensure we have the CLI session ID for saving
+                if final_cli_session_id and not current_session_id then
+                    current_session_id = final_cli_session_id
+                    vim.b[buf].opencode_session_id = current_session_id
+                end
 
                 if err then
                     table.insert(display_lines, "**Error:** " .. err)
@@ -778,8 +791,10 @@ local function run_opencode(prompt)
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 end
 
-                -- Always save session to file
-                save_session(current_session_id, table.concat(display_lines, "\n"))
+                -- Save session to file (only if we have a CLI session ID)
+                if current_session_id then
+                    save_session(current_session_id, table.concat(display_lines, "\n"))
+                end
             end)
         end)
     end
@@ -795,10 +810,9 @@ end
 -- =============================================================================
 
 local function run_opencode_command(command, args)
-    -- Ensure we have a session for commands too
-    if not current_session_id then
-        start_new_session()
-    end
+    -- Clear session for new command (session ID will be set when we get it from CLI)
+    current_session_id = nil
+    current_session_name = nil
 
     local buf, _ = create_response_split("OpenCode Response", true)
 
@@ -842,7 +856,13 @@ local function run_opencode_command(command, args)
         local spinner_char = SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
 
-        local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
+        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = parse_streaming_response(json_lines)
+
+        -- Capture CLI session ID if we don't have one yet
+        if new_cli_session_id and not current_session_id then
+            current_session_id = new_cli_session_id
+            vim.b[buf].opencode_session_id = current_session_id
+        end
 
         if is_running then
             -- Build status line with elapsed time
@@ -916,7 +936,9 @@ local function run_opencode_command(command, args)
                 table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
                 append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-                save_session(current_session_id, table.concat(display_lines, "\n"))
+                if current_session_id then
+                    save_session(current_session_id, table.concat(display_lines, "\n"))
+                end
             end
         end)
     end
@@ -963,8 +985,14 @@ local function run_opencode_command(command, args)
             end
 
             -- Final update
-            local response_lines, err = parse_streaming_response(json_lines)
+            local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
             local display_lines = vim.deepcopy(header_lines)
+
+            -- Ensure we have the CLI session ID for saving
+            if final_cli_session_id and not current_session_id then
+                current_session_id = final_cli_session_id
+                vim.b[buf].opencode_session_id = current_session_id
+            end
 
             if err then
                 table.insert(display_lines, "**Error:** " .. err)
@@ -986,8 +1014,10 @@ local function run_opencode_command(command, args)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
             end
 
-            -- Always save session
-            save_session(current_session_id, table.concat(display_lines, "\n"))
+            -- Save session (only if we have a CLI session ID)
+            if current_session_id then
+                save_session(current_session_id, table.concat(display_lines, "\n"))
+            end
         end)
     end)
 end

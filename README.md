@@ -224,16 +224,21 @@ The AI will review your last 5 commits and provide feedback.
 OpenCode provides comprehensive session management to maintain conversation context across multiple interactions:
 
 ### Session Persistence
-- **Automatic Saving**: Each conversation is automatically saved to `/tmp/opencode-nvim-sessions/` with a unique timestamp-based ID
+- **Automatic Saving**: Each conversation is automatically saved to `/tmp/opencode-nvim-sessions/` using the opencode CLI session ID
 - **Session Files**: Conversations are stored as markdown files with full query/response history
 - **Response Buffer**: Active sessions display in a dedicated vertical split buffer with syntax highlighting
 
 ### Continuing Sessions
-Use the `#session(<id>)` syntax in prompts to continue existing conversations:
+Use the `#session(<id>)` syntax in prompts to continue existing conversations. The session ID is the opencode CLI session ID (starts with `ses_`):
 
 ```lua
-#session(20241201_123456_1234) How should we optimize this function further?
+#session(ses_abc123def456) How should we optimize this function further?
 ```
+
+When continuing a session, the plugin:
+1. Loads the previous conversation from the session file
+2. Passes `--session <id>` to the opencode CLI to maintain context
+3. Appends the new response to the conversation history
 
 ### Session Picker
 - **Browse Sessions**: Use `:OpenCodeSessions` (`:OCSessions`) to view all saved sessions
