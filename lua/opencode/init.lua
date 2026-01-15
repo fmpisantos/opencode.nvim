@@ -35,7 +35,6 @@ local default_config = {
 -- State
 -- =============================================================================
 
-local nvim_cwd = vim.fn.getcwd()
 local config_dir = vim.fn.stdpath("data") .. "/opencode"
 local config_file = config_dir .. "/config.json"
 local sessions_dir = "/tmp/opencode-nvim-sessions"
@@ -84,6 +83,16 @@ end
 load_config()
 
 -- =============================================================================
+-- Helper: Get Current Working Directory
+-- =============================================================================
+
+--- Get current working directory (evaluated at call time, not module load)
+---@return string
+local function get_cwd()
+    return vim.fn.getcwd()
+end
+
+-- =============================================================================
 -- Session Management
 -- =============================================================================
 
@@ -91,7 +100,7 @@ load_config()
 ---@return string
 local function get_project_session_dir()
     -- Replace path separators and special chars with underscores
-    local safe_path = nvim_cwd:gsub("[/\\:*?\"<>|]", "_"):gsub("^_+", "")
+    local safe_path = get_cwd():gsub("[/\\:*?\"<>|]", "_"):gsub("^_+", "")
     return sessions_dir .. "/" .. safe_path
 end
 
@@ -195,14 +204,22 @@ end
 -- =============================================================================
 
 local function has_agents_md()
-    return vim.fn.filereadable(nvim_cwd .. "/AGENTS.md") == 1
+    return vim.fn.filereadable(get_cwd() .. "/AGENTS.md") == 1
 end
 
 local function init_opencode(callback)
-    vim.system({ "opencode", "agent", "create" }, { cwd = nvim_cwd }, function(result)
+    local cwd = get_cwd()
+    vim.system({ "opencode", "agent", "create" }, { cwd = cwd }, function(result)
         if callback then
             vim.schedule(function()
-                callback(result.code == 0)
+                if result.code ~= 0 then
+                    -- Log error for debugging
+                    local stderr = result.stderr or ""
+                    if stderr ~= "" then
+                        vim.notify("opencode agent create failed: " .. stderr, vim.log.levels.WARN)
+                    end
+                end
+                callback(result.code == 0, result.stderr)
             end)
         end
     end)
@@ -718,7 +735,7 @@ local function run_opencode(prompt)
 
         -- Use streaming stdout handler
         system_obj = vim.system(cmd, {
-            cwd = nvim_cwd,
+            cwd = get_cwd(),
             stdout = function(err, data)
                 if data then
                     vim.schedule(function()
@@ -784,7 +801,7 @@ local function run_opencode(prompt)
         update_display()
         start_update_timer()
 
-        init_opencode(function(success)
+        init_opencode(function(success, stderr)
             if success then
                 execute()
             else
@@ -797,6 +814,15 @@ local function run_opencode(prompt)
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
                     table.insert(display_lines, "**Error:** Failed to initialize opencode")
+                    if stderr and stderr ~= "" then
+                        table.insert(display_lines, "")
+                        table.insert(display_lines, "```")
+                        table.insert(display_lines, stderr)
+                        table.insert(display_lines, "```")
+                    end
+                    table.insert(display_lines, "")
+                    table.insert(display_lines, "Make sure the `opencode` CLI is installed and in your PATH.")
+                    table.insert(display_lines, "Try running `opencode agent create` manually in your project directory.")
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 end
             end
@@ -835,7 +861,7 @@ local function run_opencode_command(command, args)
             (args and args ~= "") and args or nil
         )
 
-        vim.system(cmd, { cwd = nvim_cwd }, function(result)
+        vim.system(cmd, { cwd = get_cwd() }, function(result)
             vim.schedule(function()
                 local json_output = parse_lines(result.stdout)
                 local response, err = parse_opencode_response(json_output)
@@ -926,7 +952,7 @@ local function get_source_file()
 
     -- Convert to path relative to cwd
     local full_path = vim.fn.fnamemodify(bufname, ":p")
-    local cwd = nvim_cwd
+    local cwd = get_cwd()
     if not cwd:match("/$") then
         cwd = cwd .. "/"
     end
