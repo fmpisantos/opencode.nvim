@@ -625,6 +625,9 @@ local function run_opencode(prompt)
     local system_obj = nil
     local is_running = true
     local is_initializing = false
+    local init_message = nil
+    local init_start_time = nil
+    local run_start_time = nil
     local spinner_idx = 1
     local update_timer = nil
 
@@ -642,8 +645,22 @@ local function run_opencode(prompt)
         spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
 
         if is_initializing then
-            table.insert(display_lines, "**Status:** Initializing opencode... " .. spinner_char)
+            local elapsed = ""
+            if init_start_time then
+                local seconds = math.floor((vim.loop.now() - init_start_time) / 1000)
+                elapsed = " (" .. seconds .. "s)"
+            end
+            table.insert(display_lines, "**Status:** Initializing opencode" .. elapsed .. " " .. spinner_char)
             table.insert(display_lines, "")
+            if init_message then
+                table.insert(display_lines, init_message)
+                table.insert(display_lines, "")
+            end
+            table.insert(display_lines, "_Creating AGENTS.md in your project directory..._")
+            table.insert(display_lines, "_Running:_ `opencode agent create`")
+            table.insert(display_lines, "")
+            table.insert(display_lines, "This is a one-time setup that configures opencode for your project.")
+            table.insert(display_lines, "It may take a moment on first run.")
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
             return
         end
@@ -651,19 +668,24 @@ local function run_opencode(prompt)
         local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
 
         if is_running then
-            -- Build status line
+            -- Build status line with elapsed time
+            local elapsed = ""
+            if run_start_time then
+                local seconds = math.floor((vim.loop.now() - run_start_time) / 1000)
+                elapsed = " (" .. seconds .. "s)"
+            end
             local status_text
 
             if is_thinking then
-                status_text = "**Status:** Thinking... " .. spinner_char
+                status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
             elseif current_tool then
                 if tool_status == "calling" then
-                    status_text = "**Status:** Executing `" .. current_tool .. "`... " .. spinner_char
+                    status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
                 else
-                    status_text = "**Status:** Completed `" .. current_tool .. "` " .. spinner_char
+                    status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
                 end
             else
-                status_text = "**Status:** Running" .. model_info .. " " .. spinner_char
+                status_text = "**Status:** Running" .. model_info .. elapsed .. " " .. spinner_char
             end
 
             table.insert(display_lines, status_text)
@@ -724,8 +746,9 @@ local function run_opencode(prompt)
     end
 
     local function execute()
-        -- Clear initializing state
+        -- Clear initializing state and start run timer
         is_initializing = false
+        run_start_time = vim.loop.now()
 
         vim.fn.timer_start(TIMEOUT_MS, function()
             if is_running then
@@ -798,6 +821,7 @@ local function run_opencode(prompt)
     if not has_agents_md() then
         -- Set initializing state and start spinner
         is_initializing = true
+        init_start_time = vim.loop.now()
         update_display()
         start_update_timer()
 
