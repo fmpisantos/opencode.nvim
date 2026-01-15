@@ -815,7 +815,8 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines_to_set)
         if draft_cursor then
             -- Adjust cursor if we inserted a session line
-            local row_offset = (session_to_use and not has_session_reference(table.concat(draft_content, "\n"))) and 1 or 0
+            local row_offset = (session_to_use and not has_session_reference(table.concat(draft_content, "\n"))) and 1 or
+                0
             pcall(vim.api.nvim_win_set_cursor, win, { draft_cursor[1] + row_offset, draft_cursor[2] })
         end
     elseif session_to_use then
@@ -1135,12 +1136,17 @@ end
 -- Commands & Keymaps
 -- =============================================================================
 
+local function create_user_command(name, func, args)
+    vim.api.nvim_create_user_command("OpenCode" .. name, func, args)
+    vim.api.nvim_create_user_command("OC" .. name, func, args)
+end
+
 local function setup_commands()
-    vim.api.nvim_create_user_command("OpenCode", function()
+    create_user_command("OpenCode", function()
         M.OpenCode(nil, nil, get_source_file())
     end, { nargs = 0 })
 
-    vim.api.nvim_create_user_command("OpenCodeWSelection", function()
+    create_user_command("WSelection", function()
         local source_file = get_source_file()
         local mode = vim.fn.mode()
 
@@ -1155,19 +1161,19 @@ local function setup_commands()
         M.OpenCode(selection_lines, vim.bo.filetype, source_file)
     end, { nargs = 0 })
 
-    vim.api.nvim_create_user_command("OpenCodeModel", function()
+    create_user_command("Model", function()
         M.SelectModel()
     end, { nargs = 0 })
 
-    vim.api.nvim_create_user_command("OpenCodeReview", function()
+    create_user_command("Review", function()
         M.OpenCodeReview()
     end, { nargs = 0 })
 
-    vim.api.nvim_create_user_command("OpenCodeCLI", function()
+    create_user_command("CLI", function()
         M.ToggleCLI()
     end, { nargs = 0 })
 
-    vim.api.nvim_create_user_command("OpenCodeSessions", function()
+    create_user_command("Sessions", function()
         M.SelectSession()
     end, { nargs = 0 })
 end
@@ -1179,7 +1185,8 @@ local function setup_keymaps()
 
     local keymap = user_config.keymaps.open_prompt
     vim.keymap.set("n", keymap, "<Cmd>OpenCode<CR>", { noremap = true, silent = true, desc = "Open OpenCode prompt" })
-    vim.keymap.set("v", keymap, "<Cmd>OpenCodeWSelection<CR>", { noremap = true, silent = true, desc = "Open OpenCode with selection" })
+    vim.keymap.set("v", keymap, "<Cmd>OpenCodeWSelection<CR>",
+        { noremap = true, silent = true, desc = "Open OpenCode with selection" })
 end
 
 -- =============================================================================
