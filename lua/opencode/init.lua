@@ -1,16 +1,28 @@
 local M = {}
 
--- Get the directory where nvim was started from
-local nvim_cwd = vim.fn.getcwd()
+-- =============================================================================
+-- Constants
+-- =============================================================================
 
--- Config file path for storing model selection
+local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+local TIMEOUT_MS = 120000 -- 2 minutes
+local SPINNER_INTERVAL_MS = 80
+
+-- =============================================================================
+-- State
+-- =============================================================================
+
+local nvim_cwd = vim.fn.getcwd()
 local config_dir = vim.fn.stdpath("data") .. "/opencode"
 local config_file = config_dir .. "/config.json"
-
--- Current selected model (nil means use default)
 local selected_model = nil
+local draft_content = nil
+local draft_cursor = nil
 
--- Load saved model from config file
+-- =============================================================================
+-- Config Management
+-- =============================================================================
+
 local function load_config()
     if vim.fn.filereadable(config_file) == 1 then
         local content = vim.fn.readfile(config_file)
@@ -23,45 +35,144 @@ local function load_config()
     end
 end
 
--- Save model to config file
 local function save_config()
     vim.fn.mkdir(config_dir, "p")
     local data = { model = selected_model }
     vim.fn.writefile({ vim.json.encode(data) }, config_file)
 end
 
--- Get current model display string
 local function get_model_display()
     if selected_model and selected_model ~= "" then
-        -- Show shortened model name (just the model part after /)
-        local short = selected_model:match("/(.+)$") or selected_model
-        return short
+        return selected_model:match("/(.+)$") or selected_model
     end
     return "default"
 end
 
--- Load config on startup
+-- Load config on module load
 load_config()
 
--- Check if AGENTS.md exists in the nvim start directory
+-- =============================================================================
+-- Helper Functions
+-- =============================================================================
+
 local function has_agents_md()
     return vim.fn.filereadable(nvim_cwd .. "/AGENTS.md") == 1
 end
 
--- Initialize opencode in the directory (creates AGENTS.md)
 local function init_opencode(callback)
-    vim.fn.jobstart({ "opencode", "agent", "create" }, {
-        cwd = nvim_cwd,
-        on_exit = function(_, code)
-            if callback then
-                callback(code == 0)
-            end
-        end,
-    })
+    vim.system({ "opencode", "agent", "create" }, { cwd = nvim_cwd }, function(result)
+        if callback then
+            vim.schedule(function()
+                callback(result.code == 0)
+            end)
+        end
+    end)
 end
 
--- Parse opencode JSON output and extract only assistant text (no thinking)
--- Returns: response_text, error_message, is_thinking
+--- Create a response buffer in a vertical split
+---@param name string Buffer name
+---@return number buf Buffer handle
+---@return number win Window handle
+local function create_response_split(name)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.cmd("vsplit")
+    local win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, buf)
+
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].filetype = "markdown"
+    vim.api.nvim_buf_set_name(buf, name)
+
+    return buf, win
+end
+
+--- Create a centered floating window
+---@param opts { width: number, height: number, title: string, filetype: string, name: string }
+---@return number buf Buffer handle
+---@return number win Window handle
+local function create_floating_window(opts)
+    local buf = vim.api.nvim_create_buf(false, true)
+    local win = vim.api.nvim_open_win(buf, true, {
+        relative = "editor",
+        width = opts.width,
+        height = opts.height,
+        col = (vim.o.columns - opts.width) / 2,
+        row = (vim.o.lines - opts.height) / 2,
+        style = "minimal",
+        border = "rounded",
+        title = opts.title,
+        title_pos = "center",
+    })
+
+    vim.bo[buf].buftype = "acwrite"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].filetype = opts.filetype or "opencode"
+    vim.api.nvim_buf_set_name(buf, opts.name)
+
+    return buf, win
+end
+
+--- Append stderr output to display lines
+---@param display_lines table Lines to append to
+---@param stderr_output table Stderr lines
+---@param is_running? boolean Whether process is still running
+local function append_stderr_block(display_lines, stderr_output, is_running)
+    if #stderr_output == 0 then
+        return
+    end
+
+    table.insert(display_lines, "")
+    if is_running then
+        table.insert(display_lines, "**stderr output (process still running):**")
+    else
+        table.insert(display_lines, "**stderr output:**")
+    end
+    table.insert(display_lines, "```")
+    for _, line in ipairs(stderr_output) do
+        table.insert(display_lines, line)
+    end
+    table.insert(display_lines, "```")
+end
+
+--- Build opencode command with common options
+---@param base_args table Base command arguments
+---@param prompt? string Optional prompt to append
+---@return table cmd Complete command
+local function build_opencode_cmd(base_args, prompt)
+    local cmd = vim.deepcopy(base_args)
+    if selected_model and selected_model ~= "" then
+        table.insert(cmd, "--model")
+        table.insert(cmd, selected_model)
+    end
+    if prompt then
+        table.insert(cmd, prompt)
+    end
+    return cmd
+end
+
+--- Parse lines from a string
+---@param str string Input string
+---@return table lines
+local function parse_lines(str)
+    local lines = {}
+    if str and str ~= "" then
+        for line in str:gmatch("[^\r\n]+") do
+            table.insert(lines, line)
+        end
+    end
+    return lines
+end
+
+-- =============================================================================
+-- Response Parsing
+-- =============================================================================
+
+--- Parse opencode JSON output and extract assistant text
+---@param json_lines table Lines of JSON output
+---@return string|nil response Response text or nil
+---@return string|nil error Error message or nil
+---@return boolean is_thinking Whether model is thinking
 local function parse_opencode_response(json_lines)
     local response_parts = {}
     local error_message = nil
@@ -71,22 +182,16 @@ local function parse_opencode_response(json_lines)
         if line and line ~= "" then
             local ok, data = pcall(vim.json.decode, line)
             if ok and data then
-                -- Check for error responses
                 if data.type == "error" and data.error then
                     local err = data.error
-                    if err.data and err.data.message then
-                        error_message = err.data.message
-                    elseif err.message then
-                        error_message = err.message
-                    else
-                        error_message = err.name or "Unknown error"
-                    end
-                -- Detect thinking events
+                    error_message = err.data and err.data.message
+                        or err.message
+                        or err.name
+                        or "Unknown error"
                 elseif data.type == "thinking" or (data.part and data.part.type == "thinking") then
                     is_thinking = true
-                -- Look for text events from assistant (not thinking)
                 elseif data.type == "text" and data.part and data.part.type == "text" then
-                    is_thinking = false -- No longer thinking once text arrives
+                    is_thinking = false
                     table.insert(response_parts, data.part.text or "")
                 end
             end
@@ -100,363 +205,356 @@ local function parse_opencode_response(json_lines)
     return table.concat(response_parts, ""), nil, is_thinking
 end
 
--- Loading spinner frames
-local spinner_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+-- =============================================================================
+-- Spinner
+-- =============================================================================
 
--- Run opencode with the given prompt and show response in a split
+---@class Spinner
+---@field private buf number
+---@field private is_running boolean
+---@field private timer number|nil
+---@field private idx number
+---@field private prefix string
+---@field private header_lines table
+local Spinner = {}
+Spinner.__index = Spinner
+
+---@param buf number Buffer handle
+---@param prefix string Loading message prefix
+---@param header_lines table Header lines to display
+---@return Spinner
+function Spinner.new(buf, prefix, header_lines)
+    local self = setmetatable({}, Spinner)
+    self.buf = buf
+    self.is_running = true
+    self.timer = nil
+    self.idx = 1
+    self.prefix = prefix
+    self.header_lines = header_lines
+    return self
+end
+
+function Spinner:start()
+    local function update()
+        if not self.is_running or not vim.api.nvim_buf_is_valid(self.buf) then
+            return
+        end
+
+        local display_lines = vim.deepcopy(self.header_lines)
+        table.insert(display_lines, self.prefix .. SPINNER_FRAMES[self.idx])
+        table.insert(display_lines, "")
+        vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, display_lines)
+
+        self.idx = (self.idx % #SPINNER_FRAMES) + 1
+
+        if self.is_running then
+            self.timer = vim.fn.timer_start(SPINNER_INTERVAL_MS, function()
+                update()
+            end)
+        end
+    end
+
+    self.timer = vim.fn.timer_start(0, function()
+        update()
+    end)
+end
+
+function Spinner:stop()
+    self.is_running = false
+    if self.timer then
+        vim.fn.timer_stop(self.timer)
+        self.timer = nil
+    end
+end
+
+-- =============================================================================
+-- Run OpenCode
+-- =============================================================================
+
 local function run_opencode(prompt)
     if not prompt or prompt == "" then
         return
     end
 
-    -- Check if #plan is in the prompt to determine agent mode
+    -- Determine agent mode
     local agent = "build"
     if prompt:match("#plan") then
         agent = "plan"
-        -- Remove #plan from the prompt
         prompt = prompt:gsub("#plan%s*", ""):gsub("%s*#plan", "")
     end
 
-    -- Create response buffer and split window
-    local response_buf = vim.api.nvim_create_buf(false, true)
-    vim.cmd("vsplit")
-    local response_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(response_win, response_buf)
+    local response_buf = create_response_split("OpenCode Response")
 
-    vim.bo[response_buf].buftype = "nofile"
-    vim.bo[response_buf].bufhidden = "wipe"
-    vim.bo[response_buf].filetype = "markdown"
-    vim.api.nvim_buf_set_name(response_buf, "OpenCode Response")
+    -- Build command
+    local cmd = build_opencode_cmd(
+        { "opencode", "run", "--agent", agent, "--format", "json" },
+        prompt
+    )
 
-    -- Build command with optional model
-    local cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
-    if selected_model and selected_model ~= "" then
-        table.insert(cmd, "--model")
-        table.insert(cmd, selected_model)
-    end
-    table.insert(cmd, prompt)
-
-    -- Build header lines showing command and query
-    -- Replace newlines in command display to avoid breaking nvim_buf_set_lines
+    -- Build header
     local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
     local header_lines = {
         "**Command:** `" .. cmd_display .. "`",
         "",
         "**Query:**",
     }
-    -- Split prompt by newlines and add each line
-    local prompt_lines = vim.split(prompt, "\n", { plain = true })
-    for _, pline in ipairs(prompt_lines) do
-        table.insert(header_lines, pline)
-    end
-    table.insert(header_lines, "")
-    table.insert(header_lines, "---")
-    table.insert(header_lines, "")
+    vim.list_extend(header_lines, vim.split(prompt, "\n", { plain = true }))
+    vim.list_extend(header_lines, { "", "---", "" })
 
-    -- Show loading message with spinner
+    -- Setup spinner
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local loading_prefix = "Running opencode (" .. agent .. " mode)" .. model_info .. " "
-    local spinner_idx = 1
-    local loading_timer = nil
-    local is_loading = true
-
-    local function update_spinner()
-        if is_loading and vim.api.nvim_buf_is_valid(response_buf) then
-            vim.schedule(function()
-                if is_loading and vim.api.nvim_buf_is_valid(response_buf) then
-                    local display_lines = vim.deepcopy(header_lines)
-                    table.insert(display_lines, loading_prefix .. spinner_frames[spinner_idx])
-                    table.insert(display_lines, "")
-                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
-                    spinner_idx = (spinner_idx % #spinner_frames) + 1
-                end
-            end)
-        end
-    end
-
-    -- Start spinner animation
-    loading_timer = vim.loop.new_timer()
-    loading_timer:start(0, 80, vim.schedule_wrap(update_spinner))
-
-    local function stop_loading()
-        is_loading = false
-        if loading_timer then
-            loading_timer:stop()
-            loading_timer:close()
-            loading_timer = nil
-        end
-    end
+    local spinner = Spinner.new(response_buf, loading_prefix, header_lines)
+    spinner:start()
 
     local json_output = {}
     local stderr_output = {}
-    local job_id = nil
-    local timeout_timer = nil
-    local timeout_seconds = 120 -- 2 minute timeout
-
-    -- Function to update display with current state
-    local function update_display()
-        if not vim.api.nvim_buf_is_valid(response_buf) then
-            return
-        end
-        local display_lines = vim.deepcopy(header_lines)
-
-        if is_loading then
-            table.insert(display_lines, loading_prefix .. spinner_frames[spinner_idx])
-            table.insert(display_lines, "")
-        end
-
-        -- Show stderr in real-time if we have any
-        if #stderr_output > 0 then
-            if is_loading then
-                table.insert(display_lines, "**stderr output (process still running):**")
-            else
-                table.insert(display_lines, "**stderr output:**")
-            end
-            table.insert(display_lines, "```")
-            for _, stderr_line in ipairs(stderr_output) do
-                table.insert(display_lines, stderr_line)
-            end
-            table.insert(display_lines, "```")
-            table.insert(display_lines, "")
-        end
-
-        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
-    end
-
-    local function stop_timeout()
-        if timeout_timer then
-            timeout_timer:stop()
-            timeout_timer:close()
-            timeout_timer = nil
-        end
-    end
+    local system_obj = nil
 
     local function handle_timeout()
-        stop_loading()
-        stop_timeout()
-        -- Kill the job if still running
-        if job_id then
-            vim.fn.jobstop(job_id)
-        end
         vim.schedule(function()
+            spinner:stop()
+            if system_obj then
+                system_obj:kill(9)
+            end
             if vim.api.nvim_buf_is_valid(response_buf) then
                 local display_lines = vim.deepcopy(header_lines)
-                table.insert(display_lines, "**Error:** Request timed out after " .. timeout_seconds .. " seconds")
-                table.insert(display_lines, "")
-                if #stderr_output > 0 then
-                    table.insert(display_lines, "**stderr output:**")
-                    table.insert(display_lines, "```")
-                    for _, stderr_line in ipairs(stderr_output) do
-                        table.insert(display_lines, stderr_line)
-                    end
-                    table.insert(display_lines, "```")
-                end
+                table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
+                append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
             end
         end)
     end
 
-    local function execute_opencode()
-        -- Start timeout timer
-        timeout_timer = vim.loop.new_timer()
-        timeout_timer:start(timeout_seconds * 1000, 0, vim.schedule_wrap(handle_timeout))
+    local function execute()
+        vim.fn.timer_start(TIMEOUT_MS, function()
+            handle_timeout()
+        end)
 
-        job_id = vim.fn.jobstart(cmd, {
-            cwd = nvim_cwd,
-            stdout_buffered = false,
-            on_stdout = function(_, data)
-                if data then
-                    for _, line in ipairs(data) do
-                        if line and line ~= "" then
-                            stop_loading()
-                            stop_timeout()
-                            table.insert(json_output, line)
-                            -- Parse incrementally and update buffer
-                            local response, err = parse_opencode_response(json_output)
-                            vim.schedule(function()
-                                if vim.api.nvim_buf_is_valid(response_buf) then
-                                    local display_lines = vim.deepcopy(header_lines)
-                                    if err then
-                                        table.insert(display_lines, "Error: " .. err)
-                                    elseif response and response ~= "" then
-                                        local response_lines = vim.split(response, "\n", { plain = true })
-                                        for _, rline in ipairs(response_lines) do
-                                            table.insert(display_lines, rline)
-                                        end
-                                    end
-                                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
-                                end
-                            end)
-                        end
-                    end
+        system_obj = vim.system(cmd, { cwd = nvim_cwd }, function(result)
+            vim.schedule(function()
+                spinner:stop()
+                if not vim.api.nvim_buf_is_valid(response_buf) then
+                    return
                 end
-            end,
-            on_stderr = function(_, data)
-                if data then
-                    for _, line in ipairs(data) do
-                        if line and line ~= "" then
-                            table.insert(stderr_output, line)
-                            -- Update display to show stderr in real-time
-                            vim.schedule(update_display)
-                        end
+
+                json_output = parse_lines(result.stdout)
+                stderr_output = parse_lines(result.stderr)
+
+                local display_lines = vim.deepcopy(header_lines)
+                local response, err = parse_opencode_response(json_output)
+
+                if err then
+                    table.insert(display_lines, "**Error:** " .. err)
+                    append_stderr_block(display_lines, stderr_output)
+                elseif not response or response == "" then
+                    if result.code ~= 0 then
+                        table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
+                        append_stderr_block(display_lines, stderr_output)
+                    else
+                        table.insert(display_lines, "No response received.")
+                        append_stderr_block(display_lines, stderr_output)
                     end
+                else
+                    vim.list_extend(display_lines, vim.split(response, "\n", { plain = true }))
                 end
-            end,
-            on_exit = function(_, code)
-                stop_loading()
-                stop_timeout()
-                vim.schedule(function()
-                    if vim.api.nvim_buf_is_valid(response_buf) then
-                        local display_lines = vim.deepcopy(header_lines)
-                        local response, err = parse_opencode_response(json_output)
-                        if err then
-                            table.insert(display_lines, "Error: " .. err)
-                        elseif not response or response == "" then
-                            if code ~= 0 then
-                                table.insert(display_lines, "Error: opencode exited with code " .. code)
-                                if #stderr_output > 0 then
-                                    table.insert(display_lines, "")
-                                    table.insert(display_lines, "**stderr output:**")
-                                    table.insert(display_lines, "```")
-                                    for _, stderr_line in ipairs(stderr_output) do
-                                        table.insert(display_lines, stderr_line)
-                                    end
-                                    table.insert(display_lines, "```")
-                                end
-                            else
-                                if #stderr_output > 0 then
-                                    table.insert(display_lines, "No response received.")
-                                    table.insert(display_lines, "")
-                                    table.insert(display_lines, "**stderr output:**")
-                                    table.insert(display_lines, "```")
-                                    for _, stderr_line in ipairs(stderr_output) do
-                                        table.insert(display_lines, stderr_line)
-                                    end
-                                    table.insert(display_lines, "```")
-                                else
-                                    table.insert(display_lines, "No response received.")
-                                end
-                            end
-                        else
-                            local response_lines = vim.split(response, "\n", { plain = true })
-                            for _, rline in ipairs(response_lines) do
-                                table.insert(display_lines, rline)
-                            end
-                        end
-                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
-                    end
-                end)
-            end,
-        })
+
+                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+            end)
+        end)
     end
 
     -- Check if we need to init first
     if not has_agents_md() then
         init_opencode(function(success)
+            if success then
+                execute()
+            else
+                spinner:stop()
+                if vim.api.nvim_buf_is_valid(response_buf) then
+                    local display_lines = vim.deepcopy(header_lines)
+                    table.insert(display_lines, "Error: Failed to initialize opencode")
+                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+                end
+            end
+        end)
+    else
+        execute()
+    end
+end
+
+-- =============================================================================
+-- Run OpenCode Command (slash commands)
+-- =============================================================================
+
+local function run_opencode_command(command, args)
+    local response_buf = create_response_split("OpenCode Response")
+
+    -- Show loading message
+    local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
+    local args_display = (args and args ~= "") and (" " .. args) or ""
+    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+        "Running " .. command .. args_display .. model_info .. "...",
+        "",
+    })
+
+    local function execute()
+        local cmd = build_opencode_cmd(
+            { "opencode", "run", "--command", command, "--format", "json" },
+            (args and args ~= "") and args or nil
+        )
+
+        vim.system(cmd, { cwd = nvim_cwd }, function(result)
             vim.schedule(function()
-                if success then
-                    execute_opencode()
-                else
-                    stop_loading()
-                    if vim.api.nvim_buf_is_valid(response_buf) then
-                        local display_lines = vim.deepcopy(header_lines)
-                        table.insert(display_lines, "Error: Failed to initialize opencode")
-                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+                if not vim.api.nvim_buf_is_valid(response_buf) then
+                    return
+                end
+
+                local json_output = parse_lines(result.stdout)
+                local response, err = parse_opencode_response(json_output)
+
+                if err then
+                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Error: " .. err })
+                elseif not response or response == "" then
+                    if result.code ~= 0 then
+                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+                            "Error: opencode exited with code " .. result.code,
+                            "",
+                            result.stderr or "",
+                        })
+                    else
+                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "No response received." })
                     end
+                else
+                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false,
+                        vim.split(response, "\n", { plain = true }))
                 end
             end)
         end)
+    end
+
+    if not has_agents_md() then
+        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Initializing opencode...", "" })
+        init_opencode(function(success)
+            if success then
+                execute()
+            elseif vim.api.nvim_buf_is_valid(response_buf) then
+                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+                    "Error: Failed to initialize opencode",
+                })
+            end
+        end)
     else
-        execute_opencode()
+        execute()
     end
 end
 
--- Generate window title based on current mode
+-- =============================================================================
+-- Prompt Window
+-- =============================================================================
+
 local function get_window_title(content)
-    local mode = "build"
-    if content and content:match("#plan") then
-        mode = "plan"
-    end
-    local model_str = get_model_display()
-    return " OpenCode [" .. mode .. "] [" .. model_str .. "] "
+    local mode = (content and content:match("#plan")) and "plan" or "build"
+    return " OpenCode [" .. mode .. "] [" .. get_model_display() .. "] "
 end
 
--- Update floating window title
-local function update_window_title(win, buf)
-    if not vim.api.nvim_win_is_valid(win) then
-        return
+local function get_source_file()
+    local bufname = vim.fn.expand("%")
+    local buftype = vim.bo.buftype
+    local filetype = vim.bo.filetype
+
+    if bufname == "" or buftype ~= "" or filetype == "netrw" or filetype == "oil" then
+        return nil
     end
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    local content = table.concat(lines, "\n")
-    local title = get_window_title(content)
-    vim.api.nvim_win_set_config(win, { title = title, title_pos = "center" })
+    if vim.fn.filereadable(bufname) == 0 then
+        return nil
+    end
+    return bufname
 end
 
 M.OpenCode = function(initial_prompt, filetype, source_file)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
 
-    local width = 60
-    local height = 10
-    local buf = vim.api.nvim_create_buf(false, true)
-    local initial_title = get_window_title(nil)
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = "editor",
-        width = width,
-        height = height,
-        col = (vim.o.columns - width) / 2,
-        row = (vim.o.lines - height) / 2,
-        style = "minimal",
-        border = "rounded",
-        title = initial_title,
-        title_pos = "center",
+    local buf, win = create_floating_window({
+        width = 60,
+        height = 10,
+        title = get_window_title(nil),
+        filetype = "opencode",
+        name = "OpenCode Prompt",
     })
 
-    vim.bo[buf].buftype = "acwrite"
-    vim.bo[buf].bufhidden = "wipe"
-    vim.bo[buf].filetype = "opencode"
-    vim.api.nvim_buf_set_name(buf, "OpenCode Prompt")
-
-    -- Store source file for #buffer replacement
     vim.b[buf].opencode_source_file = source_file
 
-    local initial_lines = {}
+    -- Setup initial content
     if initial_prompt then
-        initial_lines = { "```" .. filetype }
+        draft_content = nil
+        draft_cursor = nil
+        local initial_lines = { "```" .. filetype }
         vim.list_extend(initial_lines, initial_prompt)
         vim.list_extend(initial_lines, { "```", "" })
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
         vim.api.nvim_win_set_cursor(win, { #initial_lines, 0 })
+    elseif draft_content then
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, draft_content)
+        if draft_cursor then
+            pcall(vim.api.nvim_win_set_cursor, win, draft_cursor)
+        end
     end
 
     vim.cmd("startinsert")
 
-    -- Update title when buffer content changes
+    -- Update title on content change
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
         buffer = buf,
         callback = function()
-            update_window_title(win, buf)
+            if vim.api.nvim_win_is_valid(win) then
+                local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+                local content = table.concat(lines, "\n")
+                vim.api.nvim_win_set_config(win, {
+                    title = get_window_title(content),
+                    title_pos = "center",
+                })
+            end
         end,
     })
 
     local function submit_prompt()
         local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
         local content = table.concat(lines, "\n")
-        -- Replace #buffer or #buf with source file path if available
+
         if source_file and source_file ~= "" then
-            content = content:gsub("#buffer", "@" .. source_file)
-            content = content:gsub("#buf", "@" .. source_file)
+            content = content:gsub("#buffer", "@" .. source_file):gsub("#buf", "@" .. source_file)
         end
+
+        draft_content = nil
+        draft_cursor = nil
         vim.api.nvim_win_close(win, true)
+
         if content and content ~= "" then
             run_opencode(content)
         end
     end
 
+    local function save_draft_and_close()
+        local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+        local has_content = vim.iter(lines):any(function(line)
+            return line ~= ""
+        end)
+
+        if has_content then
+            draft_content = lines
+            draft_cursor = vim.api.nvim_win_get_cursor(win)
+        else
+            draft_content = nil
+            draft_cursor = nil
+        end
+        vim.api.nvim_win_close(win, true)
+    end
+
+    -- Keymaps
     vim.api.nvim_create_autocmd("BufWriteCmd", {
         buffer = buf,
-        callback = function()
-            submit_prompt()
-        end,
+        callback = submit_prompt,
     })
 
     vim.keymap.set("c", "wq", function()
@@ -467,229 +565,25 @@ M.OpenCode = function(initial_prompt, filetype, source_file)
         return "wq"
     end, { buffer = buf, expr = true })
 
-    vim.keymap.set("n", "q", function()
-        vim.api.nvim_win_close(win, true)
-    end, { buffer = buf, noremap = true, silent = true })
-    vim.keymap.set("n", "<Esc>", function()
-        vim.api.nvim_win_close(win, true)
-    end, { buffer = buf, noremap = true, silent = true })
+    vim.keymap.set("n", "q", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
+    vim.keymap.set("n", "<Esc>", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
 end
 
-local function get_source_file()
-    local bufname = vim.fn.expand("%")
-    local buftype = vim.bo.buftype
-    local filetype = vim.bo.filetype
-    -- Check if it's a real file (not netrw, oil, temp buffer, etc.)
-    if bufname == "" or buftype ~= "" or filetype == "netrw" or filetype == "oil" then
-        return nil
-    end
-    -- Check if file exists on disk
-    if vim.fn.filereadable(bufname) == 0 then
-        return nil
-    end
-    return bufname
-end
+-- =============================================================================
+-- Review Window
+-- =============================================================================
 
--- Select model using Telescope
-M.SelectModel = function()
-    local pickers = require("telescope.pickers")
-    local finders = require("telescope.finders")
-    local conf = require("telescope.config").values
-    local actions = require("telescope.actions")
-    local action_state = require("telescope.actions.state")
-
-    -- Get models list
-    local models = {}
-    local handle = io.popen("opencode models 2>&1")
-    if handle then
-        for line in handle:lines() do
-            if line and line ~= "" then
-                table.insert(models, line)
-            end
-        end
-        handle:close()
-    end
-
-    -- Add "default" option at the beginning
-    table.insert(models, 1, "(default - no model specified)")
-
-    pickers.new({}, {
-        prompt_title = "Select OpenCode Model",
-        finder = finders.new_table({
-            results = models,
-        }),
-        sorter = conf.generic_sorter({}),
-        attach_mappings = function(prompt_bufnr, map)
-            actions.select_default:replace(function()
-                actions.close(prompt_bufnr)
-                local selection = action_state.get_selected_entry()
-                if selection then
-                    local model = selection[1]
-                    if model == "(default - no model specified)" then
-                        selected_model = nil
-                    else
-                        selected_model = model
-                    end
-                    save_config()
-                    vim.notify("OpenCode model set to: " .. get_model_display(), vim.log.levels.INFO)
-                end
-            end)
-            return true
-        end,
-    }):find()
-end
-
-vim.api.nvim_create_user_command("OpenCode", function()
-    local source_file = get_source_file()
-    M.OpenCode(nil, nil, source_file)
-end, { nargs = 0 })
-
-vim.api.nvim_create_user_command("OpenCodeWSelection", function()
-    local source_file = get_source_file()
-    local mode = vim.fn.mode()
-    if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
-        M.OpenCode(nil, nil, source_file)
-        return
-    end
-    local start_pos = vim.fn.getpos("v")
-    local end_pos = vim.fn.getpos(".")
-    local selection_lines = vim.fn.getregion(start_pos, end_pos, { type = mode })
-    local filetype = vim.bo.filetype
-    M.OpenCode(selection_lines, filetype, source_file)
-end, { nargs = 0 })
-
-vim.api.nvim_create_user_command("OpenCodeModel", function()
-    M.SelectModel()
-end, { nargs = 0 })
-
--- Run opencode with a slash command
-local function run_opencode_command(command, args)
-    -- Create response buffer and split window
-    local response_buf = vim.api.nvim_create_buf(false, true)
-    vim.cmd("vsplit")
-    local response_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(response_win, response_buf)
-
-    vim.bo[response_buf].buftype = "nofile"
-    vim.bo[response_buf].bufhidden = "wipe"
-    vim.bo[response_buf].filetype = "markdown"
-    vim.api.nvim_buf_set_name(response_buf, "OpenCode Response")
-
-    -- Show loading message
-    local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
-    local args_display = (args and args ~= "") and (" " .. args) or ""
-    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false,
-        { "Running " .. command .. args_display .. model_info .. "...", "" })
-
-    local json_output = {}
-
-    local function execute_opencode()
-        -- Build command
-        local cmd = { "opencode", "run", "--command", command, "--format", "json" }
-        if selected_model and selected_model ~= "" then
-            table.insert(cmd, "--model")
-            table.insert(cmd, selected_model)
-        end
-        if args and args ~= "" then
-            table.insert(cmd, args)
-        end
-
-        vim.fn.jobstart(cmd, {
-            cwd = nvim_cwd,
-            stdout_buffered = false,
-            on_stdout = function(_, data)
-                if data then
-                    for _, line in ipairs(data) do
-                        if line and line ~= "" then
-                            table.insert(json_output, line)
-                            -- Parse incrementally and update buffer
-                            local response, err = parse_opencode_response(json_output)
-                            vim.schedule(function()
-                                if vim.api.nvim_buf_is_valid(response_buf) then
-                                    if err then
-                                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Error: " .. err })
-                                    elseif response and response ~= "" then
-                                        local lines = vim.split(response, "\n", { plain = true })
-                                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, lines)
-                                    end
-                                end
-                            end)
-                        end
-                    end
-                end
-            end,
-            on_stderr = function(_, data)
-                -- Ignore stderr
-            end,
-            on_exit = function(_, code)
-                vim.schedule(function()
-                    if vim.api.nvim_buf_is_valid(response_buf) then
-                        local response, err = parse_opencode_response(json_output)
-                        if err then
-                            vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Error: " .. err })
-                        elseif not response or response == "" then
-                            if code ~= 0 then
-                                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false,
-                                    { "Error: opencode exited with code " .. code })
-                            else
-                                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "No response received." })
-                            end
-                        else
-                            local lines = vim.split(response, "\n", { plain = true })
-                            vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, lines)
-                        end
-                    end
-                end)
-            end,
-        })
-    end
-
-    -- Check if we need to init first
-    if not has_agents_md() then
-        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Initializing opencode...", "" })
-        init_opencode(function(success)
-            vim.schedule(function()
-                if success then
-                    execute_opencode()
-                else
-                    if vim.api.nvim_buf_is_valid(response_buf) then
-                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false,
-                            { "Error: Failed to initialize opencode" })
-                    end
-                end
-            end)
-        end)
-    else
-        execute_opencode()
-    end
-end
-
--- OpenCode Review command with input prompt
 M.OpenCodeReview = function()
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
 
-    local width = 60
-    local height = 8
-    local buf = vim.api.nvim_create_buf(false, true)
-    local model_str = get_model_display()
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = "editor",
-        width = width,
-        height = height,
-        col = (vim.o.columns - width) / 2,
-        row = (vim.o.lines - height) / 2,
-        style = "minimal",
-        border = "rounded",
-        title = " OpenCode Review [" .. model_str .. "] ",
-        title_pos = "center",
+    local buf, win = create_floating_window({
+        width = 60,
+        height = 8,
+        title = " OpenCode Review [" .. get_model_display() .. "] ",
+        filetype = "opencode",
+        name = "OpenCode Review",
     })
 
-    vim.bo[buf].buftype = "acwrite"
-    vim.bo[buf].bufhidden = "wipe"
-    vim.bo[buf].filetype = "opencode"
-    vim.api.nvim_buf_set_name(buf, "OpenCode Review")
-
-    -- Set initial help text
     local help_lines = {
         "# Review target (leave empty for default):",
         "# Examples:",
@@ -706,13 +600,9 @@ M.OpenCodeReview = function()
 
     local function submit_review()
         local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-        -- Filter out comment lines and empty lines to get the actual input
-        local input_lines = {}
-        for _, line in ipairs(lines) do
-            if not line:match("^#") then
-                table.insert(input_lines, line)
-            end
-        end
+        local input_lines = vim.iter(lines):filter(function(line)
+            return not line:match("^#")
+        end):totable()
         local args = vim.trim(table.concat(input_lines, " "))
         vim.api.nvim_win_close(win, true)
         run_opencode_command("/review", args)
@@ -720,9 +610,7 @@ M.OpenCodeReview = function()
 
     vim.api.nvim_create_autocmd("BufWriteCmd", {
         buffer = buf,
-        callback = function()
-            submit_review()
-        end,
+        callback = submit_review,
     })
 
     vim.keymap.set("c", "wq", function()
@@ -736,10 +624,81 @@ M.OpenCodeReview = function()
     vim.keymap.set("n", "q", function()
         vim.api.nvim_win_close(win, true)
     end, { buffer = buf, noremap = true, silent = true })
+
     vim.keymap.set("n", "<Esc>", function()
         vim.api.nvim_win_close(win, true)
     end, { buffer = buf, noremap = true, silent = true })
 end
+
+-- =============================================================================
+-- Model Selection
+-- =============================================================================
+
+M.SelectModel = function()
+    local pickers = require("telescope.pickers")
+    local finders = require("telescope.finders")
+    local conf = require("telescope.config").values
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+
+    -- Get models list synchronously
+    local result = vim.system({ "opencode", "models" }, { text = true }):wait()
+    local models = { "(default - no model specified)" }
+
+    if result.stdout then
+        for line in result.stdout:gmatch("[^\r\n]+") do
+            if line ~= "" then
+                table.insert(models, line)
+            end
+        end
+    end
+
+    pickers.new({}, {
+        prompt_title = "Select OpenCode Model",
+        finder = finders.new_table({ results = models }),
+        sorter = conf.generic_sorter({}),
+        attach_mappings = function(prompt_bufnr, _)
+            actions.select_default:replace(function()
+                actions.close(prompt_bufnr)
+                local selection = action_state.get_selected_entry()
+                if selection then
+                    local model = selection[1]
+                    selected_model = (model == "(default - no model specified)") and nil or model
+                    save_config()
+                    vim.notify("OpenCode model set to: " .. get_model_display(), vim.log.levels.INFO)
+                end
+            end)
+            return true
+        end,
+    }):find()
+end
+
+-- =============================================================================
+-- Commands & Keymaps
+-- =============================================================================
+
+vim.api.nvim_create_user_command("OpenCode", function()
+    M.OpenCode(nil, nil, get_source_file())
+end, { nargs = 0 })
+
+vim.api.nvim_create_user_command("OpenCodeWSelection", function()
+    local source_file = get_source_file()
+    local mode = vim.fn.mode()
+
+    if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
+        M.OpenCode(nil, nil, source_file)
+        return
+    end
+
+    local start_pos = vim.fn.getpos("v")
+    local end_pos = vim.fn.getpos(".")
+    local selection_lines = vim.fn.getregion(start_pos, end_pos, { type = mode })
+    M.OpenCode(selection_lines, vim.bo.filetype, source_file)
+end, { nargs = 0 })
+
+vim.api.nvim_create_user_command("OpenCodeModel", function()
+    M.SelectModel()
+end, { nargs = 0 })
 
 vim.api.nvim_create_user_command("OpenCodeReview", function()
     M.OpenCodeReview()
@@ -747,3 +706,5 @@ end, { nargs = 0 })
 
 vim.keymap.set("n", "<leader>oc", "<Cmd>OpenCode<CR>", { noremap = true, silent = true })
 vim.keymap.set("v", "<leader>oc", "<Cmd>OpenCodeWSelection<CR>", { noremap = true, silent = true })
+
+return M
