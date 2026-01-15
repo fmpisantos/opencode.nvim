@@ -913,13 +913,10 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         callback = submit_prompt,
     })
 
-    vim.keymap.set("c", "wq", function()
-        if vim.fn.getcmdtype() == ":" and vim.api.nvim_get_current_buf() == buf then
-            submit_prompt()
-            return ""
-        end
-        return "wq"
-    end, { buffer = buf, expr = true })
+    -- Handle :wq by treating it as just :w (submit_prompt already closes the window)
+    vim.api.nvim_buf_create_user_command(buf, "wq", function()
+        submit_prompt()
+    end, {})
 
     vim.keymap.set("n", "q", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
     vim.keymap.set("n", "<Esc>", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
@@ -969,13 +966,10 @@ M.OpenCodeReview = function()
         callback = submit_review,
     })
 
-    vim.keymap.set("c", "wq", function()
-        if vim.fn.getcmdtype() == ":" and vim.api.nvim_get_current_buf() == buf then
-            submit_review()
-            return ""
-        end
-        return "wq"
-    end, { buffer = buf, expr = true })
+    -- Handle :wq by treating it as just :w (submit_review already closes the window)
+    vim.api.nvim_buf_create_user_command(buf, "wq", function()
+        submit_review()
+    end, {})
 
     vim.keymap.set("n", "q", function()
         vim.api.nvim_win_close(win, true)
@@ -1193,6 +1187,35 @@ end
 -- Setup
 -- =============================================================================
 
+--- Setup auto-reload for buffers when files change on disk
+local function setup_auto_reload()
+    -- Enable autoread globally
+    vim.o.autoread = true
+
+    -- Create autocommands for detecting file changes
+    local augroup = vim.api.nvim_create_augroup("OpenCodeAutoReload", { clear = true })
+
+    -- Check for file changes when entering a buffer or window
+    vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" }, {
+        group = augroup,
+        pattern = "*",
+        callback = function()
+            if vim.fn.getcmdwintype() == "" then
+                vim.cmd("checktime")
+            end
+        end,
+    })
+
+    -- Notify when file changes are detected and reloaded
+    vim.api.nvim_create_autocmd("FileChangedShellPost", {
+        group = augroup,
+        pattern = "*",
+        callback = function()
+            vim.notify("File changed on disk. Buffer reloaded.", vim.log.levels.INFO)
+        end,
+    })
+end
+
 --- Setup the opencode plugin
 ---@param opts? table User configuration options
 function M.setup(opts)
@@ -1208,6 +1231,7 @@ function M.setup(opts)
     -- Initialize commands and keymaps
     setup_commands()
     setup_keymaps()
+    setup_auto_reload()
 
     is_initialized = true
 end
