@@ -607,6 +607,7 @@ local function run_opencode(prompt)
     local stderr_output = {}
     local system_obj = nil
     local is_running = true
+    local is_initializing = false
     local spinner_idx = 1
     local update_timer = nil
 
@@ -616,32 +617,39 @@ local function run_opencode(prompt)
             return
         end
 
-        local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
         local display_lines = vim.deepcopy(full_header)
+        local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
+
+        -- Add spinner
+        local spinner_char = SPINNER_FRAMES[spinner_idx]
+        spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
+
+        if is_initializing then
+            table.insert(display_lines, "**Status:** Initializing opencode... " .. spinner_char)
+            table.insert(display_lines, "")
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+            return
+        end
+
+        local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
 
         if is_running then
             -- Build status line
-            local status_parts = {}
-            local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
+            local status_text
 
             if is_thinking then
-                table.insert(status_parts, "**Status:** Thinking...")
+                status_text = "**Status:** Thinking... " .. spinner_char
             elseif current_tool then
                 if tool_status == "calling" then
-                    table.insert(status_parts, "**Status:** Executing `" .. current_tool .. "`...")
+                    status_text = "**Status:** Executing `" .. current_tool .. "`... " .. spinner_char
                 else
-                    table.insert(status_parts, "**Status:** Completed `" .. current_tool .. "`")
+                    status_text = "**Status:** Completed `" .. current_tool .. "` " .. spinner_char
                 end
             else
-                table.insert(status_parts, "**Status:** Running" .. model_info)
+                status_text = "**Status:** Running" .. model_info .. " " .. spinner_char
             end
 
-            -- Add spinner
-            local spinner_char = SPINNER_FRAMES[spinner_idx]
-            spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
-            status_parts[1] = status_parts[1] .. " " .. spinner_char
-
-            table.insert(display_lines, status_parts[1])
+            table.insert(display_lines, status_text)
             table.insert(display_lines, "")
         end
 
@@ -699,21 +707,14 @@ local function run_opencode(prompt)
     end
 
     local function execute()
-        -- Set initial display content immediately (before any async operations)
-        local initial_display = vim.deepcopy(full_header)
-        local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
-        table.insert(initial_display, "**Status:** Starting" .. model_info .. " " .. SPINNER_FRAMES[1])
-        table.insert(initial_display, "")
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_display)
+        -- Clear initializing state
+        is_initializing = false
 
         vim.fn.timer_start(TIMEOUT_MS, function()
             if is_running then
                 handle_timeout()
             end
         end)
-
-        -- Start spinner updates
-        start_update_timer()
 
         -- Use streaming stdout handler
         system_obj = vim.system(cmd, {
@@ -778,25 +779,32 @@ local function run_opencode(prompt)
 
     -- Check if we need to init first
     if not has_agents_md() then
-        -- Show initializing message
-        local init_display = vim.deepcopy(full_header)
-        table.insert(init_display, "**Status:** Initializing opencode... " .. SPINNER_FRAMES[1])
-        table.insert(init_display, "")
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, init_display)
+        -- Set initializing state and start spinner
+        is_initializing = true
+        update_display()
+        start_update_timer()
 
         init_opencode(function(success)
             if success then
                 execute()
             else
                 is_running = false
+                is_initializing = false
+                if update_timer then
+                    vim.fn.timer_stop(update_timer)
+                    update_timer = nil
+                end
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
-                    table.insert(display_lines, "Error: Failed to initialize opencode")
+                    table.insert(display_lines, "**Error:** Failed to initialize opencode")
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 end
             end
         end)
     else
+        -- Start spinner and execute immediately
+        update_display()
+        start_update_timer()
         execute()
     end
 end
