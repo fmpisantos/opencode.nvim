@@ -24,6 +24,10 @@ local default_config = {
         width = 60,
         height = 8,
     },
+    -- Response buffer options
+    response_buffer = {
+        wrap = true, -- Enable line wrapping in response buffer
+    },
     -- Keymaps
     keymaps = {
         enable_default = true,
@@ -223,6 +227,9 @@ local function create_response_split(name, clear)
             vim.api.nvim_win_set_buf(response_win, response_buf)
         end
 
+        -- Apply wrap setting to window
+        vim.wo[response_win].wrap = user_config.response_buffer.wrap
+
         if clear then
             vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {})
         end
@@ -240,6 +247,9 @@ local function create_response_split(name, clear)
     vim.bo[response_buf].bufhidden = "hide"
     vim.bo[response_buf].filetype = "markdown"
     vim.api.nvim_buf_set_name(response_buf, name)
+
+    -- Apply wrap setting to window
+    vim.wo[response_win].wrap = user_config.response_buffer.wrap
 
     -- Store session id in buffer variable for reference
     vim.b[response_buf].opencode_session_id = current_session_id
@@ -272,6 +282,8 @@ local function toggle_response_buffer()
         vim.cmd("vsplit")
         response_win = vim.api.nvim_get_current_win()
         vim.api.nvim_win_set_buf(response_win, response_buf)
+        -- Apply wrap setting to window
+        vim.wo[response_win].wrap = user_config.response_buffer.wrap
     end
 end
 
@@ -788,54 +800,194 @@ local function run_opencode_command(command, args)
 
     local buf, _ = create_response_split("OpenCode Response", true)
 
-    -- Show loading message
+    -- Build command
+    local cmd = build_opencode_cmd(
+        { "opencode", "run", "--agent", "build", "--format", "json", "--command", command },
+        (args and args ~= "") and args or nil
+    )
+
+    -- Build header
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local args_display = (args and args ~= "") and (" " .. args) or ""
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-        "Running " .. command .. args_display .. model_info .. "...",
+    local cmd_display = table.concat(cmd, " ")
+    local header_lines = {
+        "**Command:** `" .. cmd_display .. "`",
         "",
-    })
+        "**Running:** `/" .. command .. "`" .. args_display .. model_info,
+        "",
+        "---",
+        "",
+    }
 
-    local function execute()
-        local cmd = build_opencode_cmd(
-            { "opencode", "run", "--agent", "build", "--format", "json", "--command", command },
-            (args and args ~= "") and args or nil
-        )
+    -- State for streaming updates
+    local json_lines = {}
+    local stderr_output = {}
+    local system_obj = nil
+    local is_running = true
+    local run_start_time = vim.loop.now()
+    local spinner_idx = 1
+    local update_timer = nil
 
-        vim.system(cmd, { cwd = get_cwd() }, function(result)
-            vim.schedule(function()
-                local json_output = parse_lines(result.stdout)
-                local response, err = parse_opencode_response(json_output)
-                local display_lines = {}
+    -- Function to update display with current streaming state
+    local function update_display()
+        if not vim.api.nvim_buf_is_valid(buf) then
+            return
+        end
 
-                if err then
-                    display_lines = { "Error: " .. err }
-                elseif not response or response == "" then
-                    if result.code ~= 0 then
-                        display_lines = {
-                            "Error: opencode exited with code " .. result.code,
-                            "",
-                            result.stderr or "",
-                        }
-                    else
-                        display_lines = { "No response received." }
-                    end
+        local display_lines = vim.deepcopy(header_lines)
+
+        -- Add spinner
+        local spinner_char = SPINNER_FRAMES[spinner_idx]
+        spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
+
+        local response_lines, err, is_thinking, current_tool, tool_status = parse_streaming_response(json_lines)
+
+        if is_running then
+            -- Build status line with elapsed time
+            local elapsed = ""
+            if run_start_time then
+                local seconds = math.floor((vim.loop.now() - run_start_time) / 1000)
+                elapsed = " (" .. seconds .. "s)"
+            end
+            local status_text
+
+            if is_thinking then
+                status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
+            elseif current_tool then
+                if tool_status == "calling" then
+                    status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
                 else
-                    display_lines = vim.split(response, "\n", { plain = true })
+                    status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
                 end
+            else
+                status_text = "**Status:** Running" .. elapsed .. " " .. spinner_char
+            end
 
-                -- Update buffer if still valid
-                if vim.api.nvim_buf_is_valid(buf) then
-                    vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+            table.insert(display_lines, status_text)
+            table.insert(display_lines, "")
+        end
+
+        if err then
+            table.insert(display_lines, "**Error:** " .. err)
+            append_stderr_block(display_lines, stderr_output)
+        elseif #response_lines > 0 then
+            vim.list_extend(display_lines, response_lines)
+        elseif not is_running then
+            table.insert(display_lines, "No response received.")
+            append_stderr_block(display_lines, stderr_output)
+        end
+
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+
+        -- Auto-scroll to bottom if window is valid
+        local wins = vim.fn.win_findbuf(buf)
+        if #wins > 0 then
+            local line_count = vim.api.nvim_buf_line_count(buf)
+            pcall(vim.api.nvim_win_set_cursor, wins[1], { line_count, 0 })
+        end
+    end
+
+    -- Start periodic display updates for spinner
+    local function start_update_timer()
+        update_timer = vim.fn.timer_start(SPINNER_INTERVAL_MS, function()
+            vim.schedule(function()
+                if is_running then
+                    update_display()
+                    start_update_timer()
                 end
-
-                -- Always save session
-                save_session(current_session_id, table.concat(display_lines, "\n"))
             end)
         end)
     end
 
-    execute()
+    local function handle_timeout()
+        vim.schedule(function()
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
+            if system_obj then
+                system_obj:kill(9)
+            end
+            if vim.api.nvim_buf_is_valid(buf) then
+                local display_lines = vim.deepcopy(header_lines)
+                table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
+                append_stderr_block(display_lines, stderr_output)
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+                save_session(current_session_id, table.concat(display_lines, "\n"))
+            end
+        end)
+    end
+
+    -- Start timeout timer
+    vim.fn.timer_start(TIMEOUT_MS, function()
+        if is_running then
+            handle_timeout()
+        end
+    end)
+
+    -- Start spinner
+    update_display()
+    start_update_timer()
+
+    -- Use streaming stdout handler
+    system_obj = vim.system(cmd, {
+        cwd = get_cwd(),
+        stdout = function(_, data)
+            if data then
+                vim.schedule(function()
+                    for line in data:gmatch("[^\r\n]+") do
+                        table.insert(json_lines, line)
+                    end
+                    update_display()
+                end)
+            end
+        end,
+        stderr = function(_, data)
+            if data then
+                vim.schedule(function()
+                    for line in data:gmatch("[^\r\n]+") do
+                        table.insert(stderr_output, line)
+                    end
+                end)
+            end
+        end,
+    }, function(result)
+        vim.schedule(function()
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
+
+            -- Final update
+            local response_lines, err = parse_streaming_response(json_lines)
+            local display_lines = vim.deepcopy(header_lines)
+
+            if err then
+                table.insert(display_lines, "**Error:** " .. err)
+                append_stderr_block(display_lines, stderr_output)
+            elseif #response_lines == 0 then
+                if result.code ~= 0 then
+                    table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
+                    append_stderr_block(display_lines, stderr_output)
+                else
+                    table.insert(display_lines, "Command completed successfully.")
+                    append_stderr_block(display_lines, stderr_output)
+                end
+            else
+                vim.list_extend(display_lines, response_lines)
+            end
+
+            -- Update buffer if still valid
+            if vim.api.nvim_buf_is_valid(buf) then
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+            end
+
+            -- Always save session
+            save_session(current_session_id, table.concat(display_lines, "\n"))
+        end)
+    end)
 end
 
 -- =============================================================================

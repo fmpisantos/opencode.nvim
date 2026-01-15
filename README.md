@@ -89,6 +89,10 @@ require("opencode").setup({
     width = 60,   -- Width of the review floating window
     height = 8,   -- Height of the review floating window
   },
+  -- Response buffer options
+  response_buffer = {
+    wrap = true,  -- Enable line wrapping in response buffer (default: true)
+  },
   -- Keymaps
   keymaps = {
     enable_default = true,            -- Set to false to disable default keymaps
