@@ -7,6 +7,8 @@ local M = {}
 local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 local TIMEOUT_MS = 120000 -- 2 minutes
 local SPINNER_INTERVAL_MS = 80
+local SESSION_SEPARATOR = "\n\n===============================================================================\n\n"
+local NEW_SESSION_LABEL = "(New Session)"
 
 -- =============================================================================
 -- Default Configuration
@@ -36,11 +38,18 @@ local default_config = {
 local nvim_cwd = vim.fn.getcwd()
 local config_dir = vim.fn.stdpath("data") .. "/opencode"
 local config_file = config_dir .. "/config.json"
+local sessions_dir = config_dir .. "/sessions"
 local selected_model = nil
 local draft_content = nil
 local draft_cursor = nil
 local user_config = vim.deepcopy(default_config)
 local is_initialized = false
+
+-- Session state
+local current_session_id = nil
+local current_session_name = nil
+local response_buf = nil
+local response_win = nil
 
 -- =============================================================================
 -- Config Management
@@ -75,6 +84,103 @@ end
 load_config()
 
 -- =============================================================================
+-- Session Management
+-- =============================================================================
+
+--- Generate a unique session ID
+---@return string
+local function generate_session_id()
+    return os.date("%Y%m%d_%H%M%S") .. "_" .. math.random(1000, 9999)
+end
+
+--- Get session file path
+---@param session_id string
+---@return string
+local function get_session_file(session_id)
+    return sessions_dir .. "/" .. session_id .. ".md"
+end
+
+--- Save session content to file
+---@param session_id string
+---@param content string
+local function save_session(session_id, content)
+    vim.fn.mkdir(sessions_dir, "p")
+    local filepath = get_session_file(session_id)
+    vim.fn.writefile(vim.split(content, "\n", { plain = true }), filepath)
+end
+
+--- Load session content from file
+---@param session_id string
+---@return string|nil
+local function load_session(session_id)
+    local filepath = get_session_file(session_id)
+    if vim.fn.filereadable(filepath) == 1 then
+        local content = vim.fn.readfile(filepath)
+        return table.concat(content, "\n")
+    end
+    return nil
+end
+
+--- List all available sessions
+---@return table sessions List of { id, name, mtime }
+local function list_sessions()
+    local sessions = {}
+    vim.fn.mkdir(sessions_dir, "p")
+    local files = vim.fn.glob(sessions_dir .. "/*.md", false, true)
+
+    for _, filepath in ipairs(files) do
+        local filename = vim.fn.fnamemodify(filepath, ":t:r")
+        local mtime = vim.fn.getftime(filepath)
+        local content = vim.fn.readfile(filepath)
+
+        -- Extract first meaningful line as name preview
+        local preview = "Empty session"
+        for _, line in ipairs(content) do
+            local trimmed = vim.trim(line)
+            if trimmed ~= "" and not trimmed:match("^[#*`-]+$") and not trimmed:match("^%*%*") then
+                preview = trimmed:sub(1, 50)
+                if #trimmed > 50 then
+                    preview = preview .. "..."
+                end
+                break
+            end
+        end
+
+        table.insert(sessions, {
+            id = filename,
+            name = preview,
+            mtime = mtime,
+            display = os.date("%Y-%m-%d %H:%M", mtime) .. " - " .. preview,
+        })
+    end
+
+    -- Sort by modification time (newest first)
+    table.sort(sessions, function(a, b)
+        return a.mtime > b.mtime
+    end)
+
+    return sessions
+end
+
+--- Start a new session
+local function start_new_session()
+    current_session_id = generate_session_id()
+    current_session_name = nil
+end
+
+--- Clear current session (for new prompt via <leader>oc)
+local function clear_session()
+    current_session_id = nil
+    current_session_name = nil
+    -- Close existing response buffer if any
+    if response_buf and vim.api.nvim_buf_is_valid(response_buf) then
+        vim.api.nvim_buf_delete(response_buf, { force = true })
+    end
+    response_buf = nil
+    response_win = nil
+end
+
+-- =============================================================================
 -- Helper Functions
 -- =============================================================================
 
@@ -92,22 +198,81 @@ local function init_opencode(callback)
     end)
 end
 
---- Create a response buffer in a vertical split
+--- Create or reuse a response buffer in a vertical split
 ---@param name string Buffer name
+---@param clear boolean Whether to clear the buffer
 ---@return number buf Buffer handle
 ---@return number win Window handle
-local function create_response_split(name)
-    local buf = vim.api.nvim_create_buf(false, true)
+local function create_response_split(name, clear)
+    -- Reuse existing buffer if valid
+    if response_buf and vim.api.nvim_buf_is_valid(response_buf) then
+        -- Check if buffer is already displayed in a window
+        local wins = vim.fn.win_findbuf(response_buf)
+        if #wins > 0 then
+            response_win = wins[1]
+            vim.api.nvim_set_current_win(response_win)
+        else
+            -- Buffer exists but not displayed, open in split
+            vim.cmd("vsplit")
+            response_win = vim.api.nvim_get_current_win()
+            vim.api.nvim_win_set_buf(response_win, response_buf)
+        end
+
+        if clear then
+            vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {})
+        end
+
+        return response_buf, response_win
+    end
+
+    -- Create new buffer
+    response_buf = vim.api.nvim_create_buf(false, true)
     vim.cmd("vsplit")
-    local win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(win, buf)
+    response_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(response_win, response_buf)
 
-    vim.bo[buf].buftype = "nofile"
-    vim.bo[buf].bufhidden = "wipe"
-    vim.bo[buf].filetype = "markdown"
-    vim.api.nvim_buf_set_name(buf, name)
+    vim.bo[response_buf].buftype = "acwrite"
+    vim.bo[response_buf].bufhidden = "hide"
+    vim.bo[response_buf].filetype = "markdown"
+    vim.api.nvim_buf_set_name(response_buf, name)
 
-    return buf, win
+    -- Setup save handler for continuing conversation
+    vim.api.nvim_create_autocmd("BufWriteCmd", {
+        buffer = response_buf,
+        callback = function()
+            continue_conversation_from_buffer()
+        end,
+    })
+
+    -- Keymap to close (hide) the buffer
+    vim.keymap.set("n", "q", function()
+        if response_win and vim.api.nvim_win_is_valid(response_win) then
+            vim.api.nvim_win_close(response_win, false)
+            response_win = nil
+        end
+    end, { buffer = response_buf, noremap = true, silent = true, desc = "Close OpenCode response" })
+
+    return response_buf, response_win
+end
+
+--- Toggle the response buffer visibility
+local function toggle_response_buffer()
+    if not response_buf or not vim.api.nvim_buf_is_valid(response_buf) then
+        vim.notify("No OpenCode session active. Use <leader>oc to start one.", vim.log.levels.INFO)
+        return
+    end
+
+    local wins = vim.fn.win_findbuf(response_buf)
+    if #wins > 0 then
+        -- Buffer is visible, close the window
+        vim.api.nvim_win_close(wins[1], false)
+        response_win = nil
+    else
+        -- Buffer is hidden, show it in a split
+        vim.cmd("vsplit")
+        response_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(response_win, response_buf)
+    end
 end
 
 --- Create a centered floating window
@@ -294,7 +459,10 @@ end
 -- Run OpenCode
 -- =============================================================================
 
-local function run_opencode(prompt)
+--- Run opencode with session support
+---@param prompt string The prompt to send
+---@param is_continuation boolean Whether this is continuing an existing session
+local function run_opencode(prompt, is_continuation)
     if not prompt or prompt == "" then
         return
     end
@@ -306,7 +474,18 @@ local function run_opencode(prompt)
         prompt = prompt:gsub("#plan%s*", ""):gsub("%s*#plan", "")
     end
 
-    local response_buf = create_response_split("OpenCode Response")
+    -- Ensure we have a session
+    if not current_session_id then
+        start_new_session()
+    end
+
+    -- Get existing content if continuing
+    local existing_content = {}
+    if is_continuation and response_buf and vim.api.nvim_buf_is_valid(response_buf) then
+        existing_content = vim.api.nvim_buf_get_lines(response_buf, 0, -1, false)
+    end
+
+    local buf, _ = create_response_split("OpenCode Response", not is_continuation)
 
     -- Build command
     local cmd = build_opencode_cmd(
@@ -314,7 +493,7 @@ local function run_opencode(prompt)
         prompt
     )
 
-    -- Build header
+    -- Build header for this query
     local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
     local header_lines = {
         "**Command:** `" .. cmd_display .. "`",
@@ -324,10 +503,21 @@ local function run_opencode(prompt)
     vim.list_extend(header_lines, vim.split(prompt, "\n", { plain = true }))
     vim.list_extend(header_lines, { "", "---", "" })
 
+    -- If continuing, prepend separator and existing content
+    local display_prefix = {}
+    if is_continuation and #existing_content > 0 then
+        display_prefix = vim.deepcopy(existing_content)
+        vim.list_extend(display_prefix, vim.split(SESSION_SEPARATOR, "\n", { plain = true }))
+    end
+
+    -- Combine prefix with header
+    local full_header = vim.deepcopy(display_prefix)
+    vim.list_extend(full_header, header_lines)
+
     -- Setup spinner
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local loading_prefix = "Running opencode (" .. agent .. " mode)" .. model_info .. " "
-    local spinner = Spinner.new(response_buf, loading_prefix, header_lines)
+    local spinner = Spinner.new(buf, loading_prefix, full_header)
     spinner:start()
 
     local json_output = {}
@@ -340,11 +530,13 @@ local function run_opencode(prompt)
             if system_obj then
                 system_obj:kill(9)
             end
-            if vim.api.nvim_buf_is_valid(response_buf) then
-                local display_lines = vim.deepcopy(header_lines)
+            if vim.api.nvim_buf_is_valid(buf) then
+                local display_lines = vim.deepcopy(full_header)
                 table.insert(display_lines, "**Error:** Request timed out after 120 seconds")
                 append_stderr_block(display_lines, stderr_output)
-                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+                -- Save session even on timeout
+                save_session(current_session_id, table.concat(display_lines, "\n"))
             end
         end)
     end
@@ -357,14 +549,14 @@ local function run_opencode(prompt)
         system_obj = vim.system(cmd, { cwd = nvim_cwd }, function(result)
             vim.schedule(function()
                 spinner:stop()
-                if not vim.api.nvim_buf_is_valid(response_buf) then
+                if not vim.api.nvim_buf_is_valid(buf) then
                     return
                 end
 
                 json_output = parse_lines(result.stdout)
                 stderr_output = parse_lines(result.stderr)
 
-                local display_lines = vim.deepcopy(header_lines)
+                local display_lines = vim.deepcopy(full_header)
                 local response, err = parse_opencode_response(json_output)
 
                 if err then
@@ -382,7 +574,10 @@ local function run_opencode(prompt)
                     vim.list_extend(display_lines, vim.split(response, "\n", { plain = true }))
                 end
 
-                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+
+                -- Save session to file
+                save_session(current_session_id, table.concat(display_lines, "\n"))
             end)
         end)
     end
@@ -394,10 +589,10 @@ local function run_opencode(prompt)
                 execute()
             else
                 spinner:stop()
-                if vim.api.nvim_buf_is_valid(response_buf) then
-                    local display_lines = vim.deepcopy(header_lines)
+                if vim.api.nvim_buf_is_valid(buf) then
+                    local display_lines = vim.deepcopy(full_header)
                     table.insert(display_lines, "Error: Failed to initialize opencode")
-                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, display_lines)
+                    vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 end
             end
         end)
@@ -406,17 +601,93 @@ local function run_opencode(prompt)
     end
 end
 
+--- Continue conversation from response buffer (called when user saves the buffer)
+local function continue_conversation_from_buffer()
+    if not response_buf or not vim.api.nvim_buf_is_valid(response_buf) then
+        return
+    end
+
+    local lines = vim.api.nvim_buf_get_lines(response_buf, 0, -1, false)
+    local content = table.concat(lines, "\n")
+
+    -- Find the last separator to get new content
+    local separator_pattern = "==============================================================================="
+    local last_sep_pos = nil
+    for i = #lines, 1, -1 do
+        if lines[i]:match(separator_pattern) then
+            last_sep_pos = i
+            break
+        end
+    end
+
+    -- Extract new prompt (content after last response or separator)
+    local new_prompt = nil
+    if last_sep_pos then
+        -- Find content after the last complete response
+        local after_sep = {}
+        local found_response = false
+        for i = last_sep_pos + 1, #lines do
+            local line = lines[i]
+            -- Skip if this is part of an existing query/response block
+            if line:match("^%*%*Command:%*%*") or line:match("^%*%*Query:%*%*") then
+                found_response = true
+            elseif found_response and line == "---" then
+                -- This is likely the end of a query block header, skip
+            elseif line:match("^%*%*Error:%*%*") then
+                -- Skip error lines
+            else
+                table.insert(after_sep, line)
+            end
+        end
+        new_prompt = vim.trim(table.concat(after_sep, "\n"))
+    else
+        -- No separator, check if there's content after the last "---"
+        local last_divider_pos = nil
+        for i = #lines, 1, -1 do
+            if lines[i] == "---" then
+                last_divider_pos = i
+                break
+            end
+        end
+        if last_divider_pos and last_divider_pos < #lines then
+            local after_divider = {}
+            for i = last_divider_pos + 1, #lines do
+                table.insert(after_divider, lines[i])
+            end
+            -- Check if this looks like a response or new input
+            local after_content = vim.trim(table.concat(after_divider, "\n"))
+            -- Only treat as new prompt if it doesn't look like an existing response
+            if not after_content:match("^```") and not after_content:match("^%*%*") then
+                new_prompt = after_content
+            end
+        end
+    end
+
+    if new_prompt and new_prompt ~= "" then
+        run_opencode(new_prompt, true)
+    else
+        vim.notify("No new prompt found. Add your message at the end of the buffer.", vim.log.levels.WARN)
+        -- Mark buffer as not modified
+        vim.bo[response_buf].modified = false
+    end
+end
+
 -- =============================================================================
 -- Run OpenCode Command (slash commands)
 -- =============================================================================
 
 local function run_opencode_command(command, args)
-    local response_buf = create_response_split("OpenCode Response")
+    -- Ensure we have a session for commands too
+    if not current_session_id then
+        start_new_session()
+    end
+
+    local buf, _ = create_response_split("OpenCode Response", true)
 
     -- Show loading message
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local args_display = (args and args ~= "") and (" " .. args) or ""
-    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
         "Running " .. command .. args_display .. model_info .. "...",
         "",
     })
@@ -429,40 +700,45 @@ local function run_opencode_command(command, args)
 
         vim.system(cmd, { cwd = nvim_cwd }, function(result)
             vim.schedule(function()
-                if not vim.api.nvim_buf_is_valid(response_buf) then
+                if not vim.api.nvim_buf_is_valid(buf) then
                     return
                 end
 
                 local json_output = parse_lines(result.stdout)
                 local response, err = parse_opencode_response(json_output)
+                local display_lines = {}
 
                 if err then
-                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Error: " .. err })
+                    display_lines = { "Error: " .. err }
                 elseif not response or response == "" then
                     if result.code ~= 0 then
-                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+                        display_lines = {
                             "Error: opencode exited with code " .. result.code,
                             "",
                             result.stderr or "",
-                        })
+                        }
                     else
-                        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "No response received." })
+                        display_lines = { "No response received." }
                     end
                 else
-                    vim.api.nvim_buf_set_lines(response_buf, 0, -1, false,
-                        vim.split(response, "\n", { plain = true }))
+                    display_lines = vim.split(response, "\n", { plain = true })
                 end
+
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+
+                -- Save session
+                save_session(current_session_id, table.concat(display_lines, "\n"))
             end)
         end)
     end
 
     if not has_agents_md() then
-        vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, { "Initializing opencode...", "" })
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Initializing opencode...", "" })
         init_opencode(function(success)
             if success then
                 execute()
-            elseif vim.api.nvim_buf_is_valid(response_buf) then
-                vim.api.nvim_buf_set_lines(response_buf, 0, -1, false, {
+            elseif vim.api.nvim_buf_is_valid(buf) then
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
                     "Error: Failed to initialize opencode",
                 })
             end
@@ -476,9 +752,28 @@ end
 -- Prompt Window
 -- =============================================================================
 
-local function get_window_title(content)
+--- Get session display name for title
+---@return string
+local function get_session_display()
+    if current_session_name then
+        local display = current_session_name:sub(1, 20)
+        if #current_session_name > 20 then
+            display = display .. "..."
+        end
+        return display
+    elseif current_session_id then
+        return "Session: " .. current_session_id:sub(1, 15)
+    end
+    return "New"
+end
+
+local function get_window_title(content, show_session)
     local mode = (content and content:match("#plan")) and "plan" or "build"
-    return " OpenCode [" .. mode .. "] [" .. get_model_display() .. "] "
+    local title = " OpenCode [" .. mode .. "] [" .. get_model_display() .. "]"
+    if show_session and current_session_id then
+        title = title .. " [" .. get_session_display() .. "]"
+    end
+    return title .. " "
 end
 
 local function get_source_file()
@@ -495,24 +790,45 @@ local function get_source_file()
     return bufname
 end
 
-M.OpenCode = function(initial_prompt, filetype, source_file)
+-- Forward declaration for session picker
+local select_session_for_prompt
+
+--- Open the main prompt window
+---@param initial_prompt? table Initial prompt lines (from visual selection)
+---@param filetype? string Filetype for code fence
+---@param source_file? string Source file path
+---@param append_to_session? boolean Whether we're appending to an existing session
+M.OpenCode = function(initial_prompt, filetype, source_file, append_to_session)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
+
+    -- If not appending, start fresh (new session)
+    if not append_to_session then
+        clear_session()
+    end
+
+    local show_session_in_title = append_to_session and current_session_id ~= nil
 
     local buf, win = create_floating_window({
         width = user_config.prompt_window.width,
         height = user_config.prompt_window.height,
-        title = get_window_title(nil),
+        title = get_window_title(nil, show_session_in_title),
         filetype = "opencode",
         name = "OpenCode Prompt",
     })
 
     vim.b[buf].opencode_source_file = source_file
+    vim.b[buf].opencode_append_to_session = append_to_session
 
     -- Setup initial content
     if initial_prompt then
         draft_content = nil
         draft_cursor = nil
-        local initial_lines = { "```" .. filetype }
+        local initial_lines = {}
+        -- Add #buffer reference if we have a source file
+        if source_file and source_file ~= "" then
+            table.insert(initial_lines, "#buffer")
+        end
+        table.insert(initial_lines, "```" .. filetype)
         vim.list_extend(initial_lines, initial_prompt)
         vim.list_extend(initial_lines, { "```", "" })
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
@@ -526,18 +842,44 @@ M.OpenCode = function(initial_prompt, filetype, source_file)
 
     vim.cmd("startinsert")
 
-    -- Update title on content change
+    -- Update title on content change and handle #session trigger
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
         buffer = buf,
         callback = function()
-            if vim.api.nvim_win_is_valid(win) then
-                local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-                local content = table.concat(lines, "\n")
-                vim.api.nvim_win_set_config(win, {
-                    title = get_window_title(content),
-                    title_pos = "center",
-                })
+            if not vim.api.nvim_win_is_valid(win) then
+                return
             end
+
+            local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+            local content = table.concat(lines, "\n")
+
+            -- Check for #session trigger
+            if content:match("#session%s*$") or content:match("#session[%s\n]") then
+                -- Remove #session from content
+                local new_lines = {}
+                for _, line in ipairs(lines) do
+                    local new_line = line:gsub("#session%s*", ""):gsub("#session", "")
+                    table.insert(new_lines, new_line)
+                end
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
+
+                -- Save current draft
+                local cursor_pos = vim.api.nvim_win_get_cursor(win)
+                draft_content = new_lines
+                draft_cursor = cursor_pos
+
+                -- Close prompt window and open session picker
+                vim.api.nvim_win_close(win, true)
+                select_session_for_prompt(source_file)
+                return
+            end
+
+            -- Update title with current mode
+            local is_appending = vim.b[buf].opencode_append_to_session
+            vim.api.nvim_win_set_config(win, {
+                title = get_window_title(content, is_appending),
+                title_pos = "center",
+            })
         end,
     })
 
@@ -549,12 +891,16 @@ M.OpenCode = function(initial_prompt, filetype, source_file)
             content = content:gsub("#buffer", "@" .. source_file):gsub("#buf", "@" .. source_file)
         end
 
+        -- Remove any #session that might be in content
+        content = content:gsub("#session%s*", ""):gsub("#session", "")
+
         draft_content = nil
         draft_cursor = nil
+        local is_appending = vim.b[buf].opencode_append_to_session
         vim.api.nvim_win_close(win, true)
 
-        if content and content ~= "" then
-            run_opencode(content)
+        if content and vim.trim(content) ~= "" then
+            run_opencode(content, is_appending)
         end
     end
 
@@ -697,6 +1043,112 @@ M.SelectModel = function()
 end
 
 -- =============================================================================
+-- Session Selection
+-- =============================================================================
+
+--- Open session picker for viewing/continuing sessions
+---@param callback? function Optional callback(session_id, session_name) after selection
+---@param for_append? boolean If true, selected session will be used for appending
+local function open_session_picker(callback, for_append)
+    local pickers = require("telescope.pickers")
+    local finders = require("telescope.finders")
+    local conf = require("telescope.config").values
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+
+    local sessions = list_sessions()
+
+    -- Create entries with "New Session" at the top
+    local entries = { { id = nil, display = NEW_SESSION_LABEL, name = nil } }
+    for _, session in ipairs(sessions) do
+        table.insert(entries, session)
+    end
+
+    pickers.new({}, {
+        prompt_title = for_append and "Select Session to Continue" or "OpenCode Sessions",
+        finder = finders.new_table({
+            results = entries,
+            entry_maker = function(entry)
+                return {
+                    value = entry,
+                    display = entry.display,
+                    ordinal = entry.display,
+                }
+            end,
+        }),
+        sorter = conf.generic_sorter({}),
+        attach_mappings = function(prompt_bufnr, _)
+            actions.select_default:replace(function()
+                actions.close(prompt_bufnr)
+                local selection = action_state.get_selected_entry()
+                if selection then
+                    local entry = selection.value
+                    if callback then
+                        callback(entry.id, entry.name)
+                    else
+                        -- Default behavior: load session into response buffer
+                        if entry.id then
+                            -- Load existing session
+                            current_session_id = entry.id
+                            current_session_name = entry.name
+                            local content = load_session(entry.id)
+                            if content then
+                                local buf, _ = create_response_split("OpenCode Response", true)
+                                vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(content, "\n", { plain = true }))
+                                vim.notify("Loaded session: " .. (entry.name or entry.id), vim.log.levels.INFO)
+                            end
+                        else
+                            -- New session selected
+                            clear_session()
+                            start_new_session()
+                            vim.notify("Started new session", vim.log.levels.INFO)
+                        end
+                    end
+                end
+            end)
+            return true
+        end,
+    }):find()
+end
+
+--- Session picker specifically for prompt window (#session trigger)
+---@param source_file? string Source file for the prompt
+select_session_for_prompt = function(source_file)
+    open_session_picker(function(session_id, session_name)
+        if session_id then
+            -- User selected an existing session to append to
+            current_session_id = session_id
+            current_session_name = session_name
+
+            -- Load the session content into response buffer
+            local content = load_session(session_id)
+            if content then
+                local buf, _ = create_response_split("OpenCode Response", true)
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(content, "\n", { plain = true }))
+            end
+
+            -- Reopen prompt window with append mode
+            M.OpenCode(nil, nil, source_file, true)
+        else
+            -- User wants a new session
+            clear_session()
+            start_new_session()
+            M.OpenCode(nil, nil, source_file, false)
+        end
+    end, true)
+end
+
+--- Public function to select sessions
+M.SelectSession = function()
+    open_session_picker()
+end
+
+--- Toggle the response buffer (OpenCodeCLI)
+M.ToggleCLI = function()
+    toggle_response_buffer()
+end
+
+-- =============================================================================
 -- Commands & Keymaps
 -- =============================================================================
 
@@ -726,6 +1178,14 @@ local function setup_commands()
 
     vim.api.nvim_create_user_command("OpenCodeReview", function()
         M.OpenCodeReview()
+    end, { nargs = 0 })
+
+    vim.api.nvim_create_user_command("OpenCodeCLI", function()
+        M.ToggleCLI()
+    end, { nargs = 0 })
+
+    vim.api.nvim_create_user_command("OpenCodeSessions", function()
+        M.SelectSession()
     end, { nargs = 0 })
 end
 
