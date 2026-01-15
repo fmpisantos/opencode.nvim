@@ -913,10 +913,9 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         callback = submit_prompt,
     })
 
-    -- Handle :wq by treating it as just :w (submit_prompt already closes the window)
-    vim.api.nvim_buf_create_user_command(buf, "wq", function()
-        submit_prompt()
-    end, {})
+    -- Handle :wq and :x by using abbreviations that expand to :w
+    vim.cmd(string.format("cnoreabbrev <buffer> wq w"))
+    vim.cmd(string.format("cnoreabbrev <buffer> x w"))
 
     vim.keymap.set("n", "q", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
     vim.keymap.set("n", "<Esc>", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
@@ -966,10 +965,9 @@ M.OpenCodeReview = function()
         callback = submit_review,
     })
 
-    -- Handle :wq by treating it as just :w (submit_review already closes the window)
-    vim.api.nvim_buf_create_user_command(buf, "wq", function()
-        submit_review()
-    end, {})
+    -- Handle :wq and :x by using abbreviations that expand to :w
+    vim.cmd(string.format("cnoreabbrev <buffer> wq w"))
+    vim.cmd(string.format("cnoreabbrev <buffer> x w"))
 
     vim.keymap.set("n", "q", function()
         vim.api.nvim_win_close(win, true)
@@ -1130,17 +1128,17 @@ end
 -- Commands & Keymaps
 -- =============================================================================
 
-local function create_user_command(name, func, args)
-    vim.api.nvim_create_user_command("OpenCode" .. name, func, args)
-    vim.api.nvim_create_user_command("OC" .. name, func, args)
-end
-
 local function setup_commands()
-    create_user_command("OpenCode", function()
+    -- Main command (OpenCode / OC)
+    vim.api.nvim_create_user_command("OpenCode", function()
+        M.OpenCode(nil, nil, get_source_file())
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OC", function()
         M.OpenCode(nil, nil, get_source_file())
     end, { nargs = 0 })
 
-    create_user_command("WSelection", function()
+    -- With selection
+    vim.api.nvim_create_user_command("OpenCodeWSelection", function()
         local source_file = get_source_file()
         local mode = vim.fn.mode()
 
@@ -1155,19 +1153,35 @@ local function setup_commands()
         M.OpenCode(selection_lines, vim.bo.filetype, source_file)
     end, { nargs = 0 })
 
-    create_user_command("Model", function()
+    -- Model selection
+    vim.api.nvim_create_user_command("OpenCodeModel", function()
+        M.SelectModel()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCModel", function()
         M.SelectModel()
     end, { nargs = 0 })
 
-    create_user_command("Review", function()
+    -- Review
+    vim.api.nvim_create_user_command("OpenCodeReview", function()
+        M.OpenCodeReview()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCReview", function()
         M.OpenCodeReview()
     end, { nargs = 0 })
 
-    create_user_command("CLI", function()
+    -- CLI toggle
+    vim.api.nvim_create_user_command("OpenCodeCLI", function()
+        M.ToggleCLI()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCCLI", function()
         M.ToggleCLI()
     end, { nargs = 0 })
 
-    create_user_command("Sessions", function()
+    -- Sessions
+    vim.api.nvim_create_user_command("OpenCodeSessions", function()
+        M.SelectSession()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCSessions", function()
         M.SelectSession()
     end, { nargs = 0 })
 end

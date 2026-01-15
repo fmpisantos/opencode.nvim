@@ -119,12 +119,14 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| `:OpenCode` | Open the prompt floating window |
-| `:OpenCodeWSelection` | Open prompt with current visual selection |
-| `:OpenCodeModel` | Open Telescope picker to select AI model |
-| `:OpenCodeReview` | Open review prompt for git revisions |
+| Command | Abbreviation | Description |
+|---------|-------------|-------------|
+| `:OpenCode` | `:OC` | Open the prompt floating window |
+| `:OpenCodeWSelection` | - | Open prompt with current visual selection |
+| `:OpenCodeModel` | `:OCModel` | Open Telescope picker to select AI model |
+| `:OpenCodeReview` | `:OCReview` | Open review prompt for git revisions |
+| `:OpenCodeCLI` | `:OCCLI` | Toggle the response buffer visibility |
+| `:OpenCodeSessions` | `:OCSessions` | Open session picker to view/manage saved sessions |
 
 ### Default Keymaps
 
@@ -133,7 +135,7 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 | Normal | `<leader>oc` | Open prompt window |
 | Visual | `<leader>oc` | Open prompt with selection |
 
-**Note**: You can disable default keymaps by setting `keymaps.enable_default = false` in setup.
+**Note**: You can disable default keymaps by setting `keymaps.enable_default = false` in setup. All commands also have abbreviation versions (e.g., `:OC`, `:OCModel`, `:OCReview`) that can be used in custom keymaps.
 
 ### Prompt Window Keybindings
 
@@ -211,6 +213,37 @@ Refactor @src/utils.lua and @src/helpers.lua to reduce duplication
 HEAD~5
 ```
 The AI will review your last 5 commits and provide feedback.
+
+## 💾 Session Management
+
+OpenCode provides comprehensive session management to maintain conversation context across multiple interactions:
+
+### Session Persistence
+- **Automatic Saving**: Each conversation is automatically saved to `/tmp/opencode-nvim-sessions/` with a unique timestamp-based ID
+- **Session Files**: Conversations are stored as markdown files with full query/response history
+- **Response Buffer**: Active sessions display in a dedicated vertical split buffer with syntax highlighting
+
+### Continuing Sessions
+Use the `#session(<id>)` syntax in prompts to continue existing conversations:
+
+```lua
+#session(20241201_123456_1234) How should we optimize this function further?
+```
+
+### Session Picker
+- **Browse Sessions**: Use `:OpenCodeSessions` (`:OCSessions`) to view all saved sessions
+- **Quick Access**: Sessions are sorted by modification time (newest first)
+- **Load & Continue**: Select any session to load it into the response buffer and continue the conversation
+
+### Draft Persistence
+- **Unsaved Prompts**: Prompts are automatically saved as drafts when closing the prompt window
+- **Draft Recovery**: Reopening the prompt window restores your previous work
+- **Buffer Association**: Drafts are preserved per buffer context
+
+### Session Commands
+- **Continue from Buffer**: When viewing an OpenCode response or session, use `<leader>oc` to continue that session (automatically added)
+- **Session Trigger**: Type `#session` (without parentheses) in the prompt window to open the session picker
+- **New Sessions**: Select "New Session" from the picker to start fresh conversations
 
 ## 🔧 How It Works
 
