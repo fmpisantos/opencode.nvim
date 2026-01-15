@@ -87,6 +87,14 @@ load_config()
 -- Session Management
 -- =============================================================================
 
+--- Get a safe directory name from the current working directory
+---@return string
+local function get_project_session_dir()
+    -- Replace path separators and special chars with underscores
+    local safe_path = nvim_cwd:gsub("[/\\:*?\"<>|]", "_"):gsub("^_+", "")
+    return sessions_dir .. "/" .. safe_path
+end
+
 --- Generate a unique session ID
 ---@return string
 local function generate_session_id()
@@ -97,14 +105,15 @@ end
 ---@param session_id string
 ---@return string
 local function get_session_file(session_id)
-    return sessions_dir .. "/" .. session_id .. ".md"
+    return get_project_session_dir() .. "/" .. session_id .. ".md"
 end
 
 --- Save session content to file
 ---@param session_id string
 ---@param content string
 local function save_session(session_id, content)
-    vim.fn.mkdir(sessions_dir, "p")
+    local project_dir = get_project_session_dir()
+    vim.fn.mkdir(project_dir, "p")
     local filepath = get_session_file(session_id)
     vim.fn.writefile(vim.split(content, "\n", { plain = true }), filepath)
 end
@@ -121,12 +130,13 @@ local function load_session(session_id)
     return nil
 end
 
---- List all available sessions
+--- List all available sessions for the current project
 ---@return table sessions List of { id, name, mtime }
 local function list_sessions()
     local sessions = {}
-    vim.fn.mkdir(sessions_dir, "p")
-    local files = vim.fn.glob(sessions_dir .. "/*.md", false, true)
+    local project_dir = get_project_session_dir()
+    vim.fn.mkdir(project_dir, "p")
+    local files = vim.fn.glob(project_dir .. "/*.md", false, true)
 
     for _, filepath in ipairs(files) do
         local filename = vim.fn.fnamemodify(filepath, ":t:r")
