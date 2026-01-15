@@ -582,11 +582,13 @@ local function run_opencode(prompt)
     -- Update buffer's session id
     vim.b[buf].opencode_session_id = current_session_id
 
-    -- Build command
-    local cmd = build_opencode_cmd(
-        { "opencode", "run", "--agent", agent, "--format", "json" },
-        prompt
-    )
+    -- Build command with session support
+    local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
+    if session_id then
+        table.insert(base_cmd, "--session")
+        table.insert(base_cmd, session_id)
+    end
+    local cmd = build_opencode_cmd(base_cmd, prompt)
 
     -- Build header for this query
     local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
