@@ -871,35 +871,25 @@ end
 -- Run OpenCode Command (slash commands)
 -- =============================================================================
 
-local function run_opencode_command(command, args, session_id)
-    -- Use provided session_id or clear session for new command
-    if session_id then
-        current_session_id = session_id
-        current_session_name = nil
-    else
-        current_session_id = nil
-        current_session_name = nil
-    end
+local function run_opencode_command(command, args)
+    -- Clear session for new command (session ID will be set when we get it from CLI)
+    current_session_id = nil
+    current_session_name = nil
 
     local buf, _ = create_response_split("OpenCode Response", true)
 
-    -- Build command with optional session
+    -- Build command
     local base_cmd = { "opencode", "run", "--agent", "build", "--format", "json", "--command", command }
-    if session_id then
-        table.insert(base_cmd, "--session")
-        table.insert(base_cmd, session_id)
-    end
     local cmd = build_opencode_cmd(base_cmd, (args and args ~= "") and args or nil)
 
     -- Build header
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
     local args_display = (args and args ~= "") and (" " .. args) or ""
-    local session_display = session_id and (" [session: " .. session_id:sub(1, 15) .. "...]") or ""
     local cmd_display = table.concat(cmd, " ")
     local header_lines = {
         "**Command:** `" .. cmd_display .. "`",
         "",
-        "**Running:** `/" .. command .. "`" .. args_display .. model_info .. session_display,
+        "**Running:** `/" .. command .. "`" .. args_display .. model_info,
         "",
         "---",
         "",
@@ -1232,7 +1222,7 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
     vim.cmd("startinsert")
 
-    -- Update title on content change and handle #session and #undo triggers
+    -- Update title on content change and handle #session trigger
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
         buffer = buf,
         callback = function()
@@ -1242,31 +1232,6 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
             local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
             local content = table.concat(lines, "\n")
-
-            -- Check for #undo trigger - requires an associated session
-            if content:match("#undo%s*$") or content:match("#undo[%s\n]") then
-                -- Extract session ID from content if present
-                local undo_session_id = content:match("#session%(([^)]+)%)") or session_to_use
-                if undo_session_id then
-                    -- Close prompt window and run undo command
-                    draft_content = nil
-                    draft_cursor = nil
-                    vim.api.nvim_win_close(win, true)
-                    run_opencode_command("undo", nil, undo_session_id)
-                    return
-                else
-                    -- No session ID available, notify user
-                    vim.notify("Cannot undo: no session ID associated. Use #session first.", vim.log.levels.WARN)
-                    -- Remove #undo from content
-                    local new_lines = {}
-                    for _, line in ipairs(lines) do
-                        local new_line = line:gsub("#undo%s*$", ""):gsub("#undo([%s\n])", "%1")
-                        table.insert(new_lines, new_line)
-                    end
-                    vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
-                    return
-                end
-            end
 
             -- Check for #session trigger (without parentheses - user wants to pick a session)
             if content:match("#session%s*$") or content:match("#session[%s\n]") then

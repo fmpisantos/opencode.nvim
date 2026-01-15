@@ -12,6 +12,7 @@ A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, al
 - **🎯 Model Selection**: Choose from available AI models via Telescope picker with persistent preferences
 - **🔍 Git Review Integration**: Review commits, branches, and diffs with AI assistance
 - **⚡ Streaming Responses**: Real-time response display with markdown syntax highlighting
+- **📋 Todo List Display**: View OpenCode's task planning and progress directly in the response buffer
 - **📂 File References**: Use `@` trigger to quickly reference files in your prompts
 - **💾 Draft Persistence**: Unsaved prompts are preserved when closing the prompt window
 
@@ -93,6 +94,8 @@ require("opencode").setup({
   response_buffer = {
     wrap = true,  -- Enable line wrapping in response buffer (default: true)
   },
+  -- Timeout in milliseconds for opencode commands (default: 2 minutes)
+  timeout_ms = 120000,
   -- Keymaps
   keymaps = {
     enable_default = true,            -- Set to false to disable default keymaps
@@ -118,6 +121,19 @@ vim.keymap.set("v", "<leader>ai", "<Cmd>OpenCodeWSelection<CR>", { desc = "OpenC
 vim.keymap.set("n", "<leader>am", "<Cmd>OpenCodeModel<CR>", { desc = "Select AI model" })
 vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review git changes" })
 ```
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `prompt_window.width` | number | `60` | Width of the prompt floating window |
+| `prompt_window.height` | number | `10` | Height of the prompt floating window |
+| `review_window.width` | number | `60` | Width of the review floating window |
+| `review_window.height` | number | `8` | Height of the review floating window |
+| `response_buffer.wrap` | boolean | `true` | Enable line wrapping in response buffer |
+| `timeout_ms` | number | `120000` | Timeout in milliseconds for opencode commands (2 minutes default) |
+| `keymaps.enable_default` | boolean | `true` | Enable default keymaps |
+| `keymaps.open_prompt` | string | `<leader>oc` | Keymap to open prompt window |
 
 ## 🚀 Usage
 
@@ -254,6 +270,37 @@ When continuing a session, the plugin:
 - **Continue from Buffer**: When viewing an OpenCode response or session, use `<leader>oc` to continue that session (automatically added)
 - **Session Trigger**: Type `#session` (without parentheses) in the prompt window to open the session picker
 - **New Sessions**: Select "New Session" from the picker to start fresh conversations
+
+## 📋 Todo List Display
+
+When OpenCode creates a todo list to plan its work, the tasks are displayed directly in the response buffer. This gives you visibility into what the AI is planning to do:
+
+```
+---
+**Todo List:**
+
+[~] Implement the new feature
+[ ] Add unit tests !!
+[ ] Update documentation !
+[x] Review existing code
+[-] Cancelled task
+---
+```
+
+**Status Icons:**
+| Icon | Status |
+|------|--------|
+| `[ ]` | Pending |
+| `[~]` | In Progress |
+| `[x]` | Completed |
+| `[-]` | Cancelled |
+
+**Priority Markers:**
+| Marker | Priority |
+|--------|----------|
+| `!!!` | High |
+| `!!` | Medium |
+| `!` | Low |
 
 ## 🔧 How It Works
 
