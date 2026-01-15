@@ -95,6 +95,7 @@ require("opencode").setup({
     wrap = true,  -- Enable line wrapping in response buffer (default: true)
   },
   -- Timeout in milliseconds for opencode commands (default: 2 minutes)
+  -- Set to -1 for unlimited timeout (no timeout)
   timeout_ms = 120000,
   -- Keymaps
   keymaps = {
@@ -131,7 +132,7 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 | `review_window.width` | number | `60` | Width of the review floating window |
 | `review_window.height` | number | `8` | Height of the review floating window |
 | `response_buffer.wrap` | boolean | `true` | Enable line wrapping in response buffer |
-| `timeout_ms` | number | `120000` | Timeout in milliseconds for opencode commands (2 minutes default) |
+| `timeout_ms` | number | `120000` | Timeout in milliseconds for opencode commands (2 minutes default). Set to `-1` for unlimited timeout. |
 | `keymaps.enable_default` | boolean | `true` | Enable default keymaps |
 | `keymaps.open_prompt` | string | `<leader>oc` | Keymap to open prompt window |
 

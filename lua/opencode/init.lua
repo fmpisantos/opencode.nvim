@@ -786,11 +786,14 @@ local function run_opencode(prompt)
         -- Start run timer
         run_start_time = vim.loop.now()
 
-        vim.fn.timer_start(user_config.timeout_ms, function()
-            if is_running then
-                handle_timeout()
-            end
-        end)
+        -- Only start timeout timer if timeout_ms is not -1
+        if user_config.timeout_ms ~= -1 then
+            vim.fn.timer_start(user_config.timeout_ms, function()
+                if is_running then
+                    handle_timeout()
+                end
+            end)
+        end
 
         -- Use streaming stdout handler
         system_obj = vim.system(cmd, {
@@ -859,6 +862,20 @@ local function run_opencode(prompt)
                 end
             end)
         end)
+
+        -- Set up autocmd to kill process if buffer is deleted
+        vim.api.nvim_create_autocmd("BufDelete", {
+            buffer = buf,
+            once = true,
+            callback = function()
+                if system_obj and is_running then
+                    pcall(function() system_obj:kill(9) end)
+                end
+                if update_timer then
+                    vim.fn.timer_stop(update_timer)
+                end
+            end,
+        })
     end
 
     -- Start spinner and execute immediately
@@ -1003,12 +1020,14 @@ local function run_opencode_command(command, args)
         end)
     end
 
-    -- Start timeout timer
-    vim.fn.timer_start(user_config.timeout_ms, function()
-        if is_running then
-            handle_timeout()
-        end
-    end)
+    -- Start timeout timer only if timeout_ms is not -1
+    if user_config.timeout_ms ~= -1 then
+        vim.fn.timer_start(user_config.timeout_ms, function()
+            if is_running then
+                handle_timeout()
+            end
+        end)
+    end
 
     -- Start spinner
     update_display()
@@ -1080,6 +1099,20 @@ local function run_opencode_command(command, args)
             end
         end)
     end)
+
+    -- Set up autocmd to kill process if buffer is deleted
+    vim.api.nvim_create_autocmd("BufDelete", {
+        buffer = buf,
+        once = true,
+        callback = function()
+            if system_obj and is_running then
+                pcall(function() system_obj:kill(9) end)
+            end
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+            end
+        end,
+    })
 end
 
 -- =============================================================================
