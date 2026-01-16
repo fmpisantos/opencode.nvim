@@ -28,6 +28,7 @@ local default_config = {
         wrap = true, -- Enable line wrapping in response buffer
     },
     -- Timeout in milliseconds (default 2 minutes)
+    -- Set to -1 to disable timeout (recommended for agentic mode)
     timeout_ms = 120000,
     -- Keymaps
     keymaps = {
@@ -37,6 +38,13 @@ local default_config = {
     -- MD files to auto-discover up the directory tree (like AGENT.md)
     -- These files provide hierarchical context to the AI
     md_files = { "AGENT.md", "AGENTS.md" },
+    -- Mode: "quick" (one-shot, files via --file) or "agentic" (server mode with full tool access)
+    mode = "quick",
+    -- Server settings for agentic mode
+    server = {
+        port = 0, -- 0 = random available port
+        hostname = "127.0.0.1",
+    },
 }
 
 -- =============================================================================
@@ -65,6 +73,14 @@ local prompt_win = nil
 -- Active requests tracking (for cancellation)
 local active_requests = {} -- table of { id = { system_obj, cleanup_fn } }
 local next_request_id = 0
+
+-- Server management state (for agentic mode)
+-- Keyed by cwd: { [cwd] = { process = system_obj, port = number, url = string, starting = bool } }
+local servers = {}
+
+-- Per-project mode preferences (loaded from disk)
+local project_modes = {} -- { [cwd] = "quick" | "agentic" }
+local project_config_file = config_dir .. "/projects.json"
 
 -- =============================================================================
 -- Config Management
@@ -106,6 +122,239 @@ load_config()
 ---@return string
 local function get_cwd()
     return vim.fn.getcwd()
+end
+
+-- =============================================================================
+-- Project Mode Management (per-project persistence)
+-- =============================================================================
+
+--- Load project modes from disk
+local function load_project_modes()
+    if vim.fn.filereadable(project_config_file) == 1 then
+        local content = vim.fn.readfile(project_config_file)
+        if #content > 0 then
+            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
+            if ok and data and data.project_modes then
+                project_modes = data.project_modes
+            end
+        end
+    end
+end
+
+--- Save project modes to disk
+local function save_project_modes()
+    vim.fn.mkdir(config_dir, "p")
+    local data = { project_modes = project_modes }
+    vim.fn.writefile({ vim.json.encode(data) }, project_config_file)
+end
+
+--- Get the mode for the current project
+---@return string mode "quick" or "agentic"
+local function get_project_mode()
+    local cwd = get_cwd()
+    if project_modes[cwd] then
+        return project_modes[cwd]
+    end
+    return user_config.mode or "quick"
+end
+
+--- Set the mode for the current project
+---@param mode string "quick" or "agentic"
+local function set_project_mode(mode)
+    if mode ~= "quick" and mode ~= "agentic" then
+        vim.notify("Invalid mode: " .. tostring(mode) .. ". Use 'quick' or 'agentic'.", vim.log.levels.ERROR)
+        return false
+    end
+    local cwd = get_cwd()
+    project_modes[cwd] = mode
+    save_project_modes()
+    return true
+end
+
+-- Load project modes on module load
+load_project_modes()
+
+-- =============================================================================
+-- Server Management (for agentic mode)
+-- =============================================================================
+
+--- Get server info for current cwd
+---@return table|nil server { process, port, url } or nil
+local function get_server_for_cwd()
+    local cwd = get_cwd()
+    local server = servers[cwd]
+    if server and server.process then
+        -- Check if process is still running
+        local exit_code = server.process:wait(0) -- Non-blocking check
+        if exit_code then
+            -- Process has exited
+            servers[cwd] = nil
+            return nil
+        end
+        return server
+    end
+    return nil
+end
+
+--- Stop server for current cwd
+local function stop_server_for_cwd()
+    local cwd = get_cwd()
+    local server = servers[cwd]
+    if server then
+        if server.process then
+            pcall(function() server.process:kill(15) end) -- SIGTERM
+            -- Give it a moment, then force kill if needed
+            vim.defer_fn(function()
+                if server.process then
+                    pcall(function() server.process:kill(9) end) -- SIGKILL
+                end
+            end, 1000)
+        end
+        servers[cwd] = nil
+        return true
+    end
+    return false
+end
+
+--- Stop all servers (for cleanup)
+local function stop_all_servers()
+    local count = 0
+    for cwd, server in pairs(servers) do
+        if server.process then
+            pcall(function() server.process:kill(9) end)
+            count = count + 1
+        end
+    end
+    servers = {}
+    return count
+end
+
+--- Start server for current cwd
+---@param callback function Called with (success, url_or_error) when server is ready
+local function start_server_for_cwd(callback)
+    local cwd = get_cwd()
+    
+    -- Check if server is already running
+    local existing = get_server_for_cwd()
+    if existing and existing.url then
+        callback(true, existing.url)
+        return
+    end
+    
+    -- Check if server is currently starting
+    if servers[cwd] and servers[cwd].starting then
+        -- Wait for it to finish starting (poll)
+        local attempts = 0
+        local function wait_for_server()
+            attempts = attempts + 1
+            local server = servers[cwd]
+            if server and server.url then
+                callback(true, server.url)
+            elseif server and server.starting and attempts < 100 then
+                vim.defer_fn(wait_for_server, 100)
+            else
+                callback(false, "Server startup timed out")
+            end
+        end
+        vim.defer_fn(wait_for_server, 100)
+        return
+    end
+    
+    -- Mark as starting
+    servers[cwd] = { starting = true }
+    
+    -- Build command
+    local port = user_config.server.port or 0
+    local hostname = user_config.server.hostname or "127.0.0.1"
+    local cmd = { "opencode", "serve", "--port", tostring(port), "--hostname", hostname }
+    
+    local captured_port = nil
+    local stderr_lines = {}
+    
+    -- Start the server process
+    local process = vim.system(cmd, {
+        cwd = cwd,
+        stdout = function(err, data)
+            if data then
+                -- Look for port in stdout (format varies, common: "Listening on http://127.0.0.1:XXXXX")
+                local port_match = data:match(":(%d+)")
+                if port_match and not captured_port then
+                    captured_port = tonumber(port_match)
+                    local url = "http://" .. hostname .. ":" .. captured_port
+                    vim.schedule(function()
+                        servers[cwd] = {
+                            process = process,
+                            port = captured_port,
+                            url = url,
+                            starting = false,
+                        }
+                        callback(true, url)
+                    end)
+                end
+            end
+        end,
+        stderr = function(err, data)
+            if data then
+                table.insert(stderr_lines, data)
+                -- Also check stderr for port info
+                local port_match = data:match(":(%d+)")
+                if port_match and not captured_port then
+                    captured_port = tonumber(port_match)
+                    local url = "http://" .. hostname .. ":" .. captured_port
+                    vim.schedule(function()
+                        servers[cwd] = {
+                            process = process,
+                            port = captured_port,
+                            url = url,
+                            starting = false,
+                        }
+                        callback(true, url)
+                    end)
+                end
+            end
+        end,
+    }, function(result)
+        -- Server process exited
+        vim.schedule(function()
+            if servers[cwd] and servers[cwd].starting then
+                -- Failed to start
+                servers[cwd] = nil
+                local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or "Server exited unexpectedly"
+                callback(false, error_msg)
+            else
+                -- Server stopped (expected or unexpected)
+                servers[cwd] = nil
+            end
+        end)
+    end)
+    
+    -- Store process reference immediately so we can track it
+    if servers[cwd] then
+        servers[cwd].process = process
+    end
+    
+    -- Timeout for server startup
+    vim.defer_fn(function()
+        if servers[cwd] and servers[cwd].starting then
+            -- Still starting after timeout - give up
+            if servers[cwd].process then
+                pcall(function() servers[cwd].process:kill(9) end)
+            end
+            servers[cwd] = nil
+            callback(false, "Server startup timed out (10s)")
+        end
+    end, 10000)
+end
+
+--- Ensure server is running for current cwd, starting if needed
+---@param callback function Called with (success, url_or_error)
+local function ensure_server_running(callback)
+    local server = get_server_for_cwd()
+    if server and server.url then
+        callback(true, server.url)
+        return
+    end
+    start_server_for_cwd(callback)
 end
 
 -- =============================================================================
@@ -824,297 +1073,351 @@ local function run_opencode(prompt, files, source_file)
     -- Update buffer's session id (may be nil for new sessions until we get it from CLI)
     vim.b[buf].opencode_session_id = current_session_id
 
-    -- Collect all files to attach:
-    -- 1. Files explicitly passed in (e.g., source buffer)
-    -- 2. Files referenced with @path in the prompt
-    -- 3. MD files discovered up the directory tree (AGENT.md, etc.)
-    local all_files = files and vim.deepcopy(files) or {}
-    local seen_files = {}
-    for _, f in ipairs(all_files) do
-        seen_files[f] = true
-    end
+    -- Get current mode (quick or agentic)
+    local mode = get_project_mode()
 
-    -- Add files referenced in prompt
-    local prompt_files = extract_file_references(prompt)
-    for _, f in ipairs(prompt_files) do
-        if not seen_files[f] then
-            table.insert(all_files, f)
+    -- Collect all files to attach (only in quick mode - agentic mode reads files itself)
+    local all_files = {}
+    if mode == "quick" then
+        -- 1. Files explicitly passed in (e.g., source buffer)
+        all_files = files and vim.deepcopy(files) or {}
+        local seen_files = {}
+        for _, f in ipairs(all_files) do
             seen_files[f] = true
         end
-    end
 
-    -- Discover and add MD files (AGENT.md, etc.) from directory hierarchy
-    local md_files = discover_md_files(source_file)
-    for _, f in ipairs(md_files) do
-        if not seen_files[f] then
-            table.insert(all_files, f)
-            seen_files[f] = true
-        end
-    end
-
-    -- Build command with --session flag if continuing
-    local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
-    if cli_session_id then
-        table.insert(base_cmd, "--session")
-        table.insert(base_cmd, cli_session_id)
-    end
-    local cmd = build_opencode_cmd(base_cmd, prompt, all_files)
-
-    -- Build header for this query
-    local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
-    local header_lines = {
-        "**Command:** `" .. cmd_display .. "`",
-        "",
-        "**Query:**",
-    }
-    vim.list_extend(header_lines, vim.split(prompt, "\n", { plain = true }))
-    vim.list_extend(header_lines, { "", "---", "" })
-
-    -- If continuing, prepend separator and existing content
-    local display_prefix = {}
-    if is_continuation and #existing_content > 0 then
-        display_prefix = vim.deepcopy(existing_content)
-        vim.list_extend(display_prefix, vim.split(SESSION_SEPARATOR, "\n", { plain = true }))
-    end
-
-    -- Combine prefix with header
-    local full_header = vim.deepcopy(display_prefix)
-    vim.list_extend(full_header, header_lines)
-
-    -- State for streaming updates
-    local json_lines = {}
-    local stderr_output = {}
-    local system_obj = nil
-    local is_running = true
-    local run_start_time = nil
-    local spinner_idx = 1
-    local update_timer = nil
-    local request_id = nil
-
-    -- Function to update display with current streaming state
-    local function update_display()
-        if not vim.api.nvim_buf_is_valid(buf) then
-            return
-        end
-
-        local display_lines = vim.deepcopy(full_header)
-        local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
-
-        -- Add spinner
-        local spinner_char = SPINNER_FRAMES[spinner_idx]
-        spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
-
-        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = parse_streaming_response(json_lines)
-
-        -- Capture CLI session ID if we don't have one yet
-        if new_cli_session_id and not current_session_id then
-            current_session_id = new_cli_session_id
-            vim.b[buf].opencode_session_id = current_session_id
-        end
-
-        if is_running then
-            -- Build status line with elapsed time
-            local elapsed = ""
-            if run_start_time then
-                local seconds = math.floor((vim.loop.now() - run_start_time) / 1000)
-                elapsed = " (" .. seconds .. "s)"
+        -- 2. Files referenced with @path in the prompt
+        local prompt_files = extract_file_references(prompt)
+        for _, f in ipairs(prompt_files) do
+            if not seen_files[f] then
+                table.insert(all_files, f)
+                seen_files[f] = true
             end
-            local status_text
+        end
 
-            if is_thinking then
-                status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
-            elseif current_tool then
-                if tool_status == "calling" or tool_status == "running" then
-                    status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+        -- 3. MD files discovered up the directory tree (AGENT.md, etc.)
+        local md_files = discover_md_files(source_file)
+        for _, f in ipairs(md_files) do
+            if not seen_files[f] then
+                table.insert(all_files, f)
+                seen_files[f] = true
+            end
+        end
+    end
+
+    -- Function to actually execute the opencode command
+    ---@param server_url? string Server URL for agentic mode (nil for quick mode)
+    local function execute_opencode(server_url)
+        -- Build command with --session flag if continuing
+        local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
+        
+        -- Add --attach for agentic mode
+        if server_url then
+            table.insert(base_cmd, "--attach")
+            table.insert(base_cmd, server_url)
+        end
+        
+        if cli_session_id then
+            table.insert(base_cmd, "--session")
+            table.insert(base_cmd, cli_session_id)
+        end
+        local cmd = build_opencode_cmd(base_cmd, prompt, all_files)
+
+        -- Build header for this query
+        local mode_display = mode == "agentic" and "[agentic]" or "[quick]"
+        local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
+        local header_lines = {
+            "**Mode:** " .. mode_display .. (server_url and (" → " .. server_url) or ""),
+            "**Command:** `" .. cmd_display .. "`",
+            "",
+            "**Query:**",
+        }
+        vim.list_extend(header_lines, vim.split(prompt, "\n", { plain = true }))
+        vim.list_extend(header_lines, { "", "---", "" })
+
+        -- If continuing, prepend separator and existing content
+        local display_prefix = {}
+        if is_continuation and #existing_content > 0 then
+            display_prefix = vim.deepcopy(existing_content)
+            vim.list_extend(display_prefix, vim.split(SESSION_SEPARATOR, "\n", { plain = true }))
+        end
+
+        -- Combine prefix with header
+        local full_header = vim.deepcopy(display_prefix)
+        vim.list_extend(full_header, header_lines)
+
+        -- State for streaming updates
+        local json_lines = {}
+        local stderr_output = {}
+        local system_obj = nil
+        local is_running = true
+        local run_start_time = nil
+        local spinner_idx = 1
+        local update_timer = nil
+        local request_id = nil
+
+        -- Function to update display with current streaming state
+        local function update_display()
+            if not vim.api.nvim_buf_is_valid(buf) then
+                return
+            end
+
+            local display_lines = vim.deepcopy(full_header)
+            local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
+
+            -- Add spinner
+            local spinner_char = SPINNER_FRAMES[spinner_idx]
+            spinner_idx = (spinner_idx % #SPINNER_FRAMES) + 1
+
+            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = parse_streaming_response(json_lines)
+
+            -- Capture CLI session ID if we don't have one yet
+            if new_cli_session_id and not current_session_id then
+                current_session_id = new_cli_session_id
+                vim.b[buf].opencode_session_id = current_session_id
+            end
+
+            if is_running then
+                -- Build status line with elapsed time
+                local elapsed = ""
+                if run_start_time then
+                    local seconds = math.floor((vim.loop.now() - run_start_time) / 1000)
+                    elapsed = " (" .. seconds .. "s)"
+                end
+                local status_text
+
+                if is_thinking then
+                    status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
+                elseif current_tool then
+                    if tool_status == "calling" or tool_status == "running" then
+                        status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+                    else
+                        status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+                    end
                 else
-                    status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+                    status_text = "**Status:** Running" .. model_info .. elapsed .. " " .. spinner_char
                 end
-            else
-                status_text = "**Status:** Running" .. model_info .. elapsed .. " " .. spinner_char
+
+                table.insert(display_lines, status_text)
+                table.insert(display_lines, "")
             end
 
-            table.insert(display_lines, status_text)
-            table.insert(display_lines, "")
-        end
-
-        -- Add todo list if present
-        if todos and #todos > 0 then
-            vim.list_extend(display_lines, format_todo_list(todos))
-        end
-
-        if err then
-            table.insert(display_lines, "**Error:** " .. err)
-            append_stderr_block(display_lines, stderr_output)
-        elseif #response_lines > 0 then
-            vim.list_extend(display_lines, response_lines)
-        elseif not is_running then
-            table.insert(display_lines, "No response received.")
-            append_stderr_block(display_lines, stderr_output)
-        end
-
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-
-        -- Auto-scroll to bottom if window is valid
-        local wins = vim.fn.win_findbuf(buf)
-        if #wins > 0 then
-            local line_count = vim.api.nvim_buf_line_count(buf)
-            pcall(vim.api.nvim_win_set_cursor, wins[1], { line_count, 0 })
-        end
-    end
-
-    -- Start periodic display updates for spinner
-    local function start_update_timer()
-        update_timer = vim.fn.timer_start(SPINNER_INTERVAL_MS, function()
-            vim.schedule(function()
-                if is_running then
-                    update_display()
-                    start_update_timer()
-                end
-            end)
-        end)
-    end
-
-    local function handle_timeout()
-        vim.schedule(function()
-            is_running = false
-            if update_timer then
-                vim.fn.timer_stop(update_timer)
-                update_timer = nil
+            -- Add todo list if present
+            if todos and #todos > 0 then
+                vim.list_extend(display_lines, format_todo_list(todos))
             end
-            if system_obj then
-                system_obj:kill(9)
-            end
-            if vim.api.nvim_buf_is_valid(buf) then
-                local display_lines = vim.deepcopy(full_header)
-                table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(user_config.timeout_ms / 1000) .. " seconds")
+
+            if err then
+                table.insert(display_lines, "**Error:** " .. err)
                 append_stderr_block(display_lines, stderr_output)
-                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-                -- Save session even on timeout (only if we have a session ID)
-                if current_session_id then
-                    save_session(current_session_id, table.concat(display_lines, "\n"))
-                end
+            elseif #response_lines > 0 then
+                vim.list_extend(display_lines, response_lines)
+            elseif not is_running then
+                table.insert(display_lines, "No response received.")
+                append_stderr_block(display_lines, stderr_output)
             end
-        end)
-    end
 
-    local function execute()
-        -- Start run timer
-        run_start_time = vim.loop.now()
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
 
-        -- Only start timeout timer if timeout_ms is not -1
-        if user_config.timeout_ms ~= -1 then
-            vim.fn.timer_start(user_config.timeout_ms, function()
-                if is_running then
-                    handle_timeout()
-                end
+            -- Auto-scroll to bottom if window is valid
+            local wins = vim.fn.win_findbuf(buf)
+            if #wins > 0 then
+                local line_count = vim.api.nvim_buf_line_count(buf)
+                pcall(vim.api.nvim_win_set_cursor, wins[1], { line_count, 0 })
+            end
+        end
+
+        -- Start periodic display updates for spinner
+        local function start_update_timer()
+            update_timer = vim.fn.timer_start(SPINNER_INTERVAL_MS, function()
+                vim.schedule(function()
+                    if is_running then
+                        update_display()
+                        start_update_timer()
+                    end
+                end)
             end)
         end
 
-        -- Use streaming stdout handler
-        system_obj = vim.system(cmd, {
-            cwd = get_cwd(),
-            stdout = function(err, data)
-                if data then
-                    vim.schedule(function()
-                        -- Parse incoming data line by line
-                        for line in data:gmatch("[^\r\n]+") do
-                            table.insert(json_lines, line)
-                        end
-                        update_display()
-                    end)
-                end
-            end,
-            stderr = function(err, data)
-                if data then
-                    vim.schedule(function()
-                        for line in data:gmatch("[^\r\n]+") do
-                            table.insert(stderr_output, line)
-                        end
-                    end)
-                end
-            end,
-        }, function(result)
+        local function handle_timeout()
             vim.schedule(function()
                 is_running = false
                 if update_timer then
                     vim.fn.timer_stop(update_timer)
                     update_timer = nil
                 end
-
-                -- Unregister the request
-                if request_id then
-                    unregister_request(request_id)
+                if system_obj then
+                    system_obj:kill(9)
                 end
-
-                -- Final update
-                local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
-                local display_lines = vim.deepcopy(full_header)
-
-                -- Ensure we have the CLI session ID for saving
-                if final_cli_session_id and not current_session_id then
-                    current_session_id = final_cli_session_id
-                    vim.b[buf].opencode_session_id = current_session_id
-                end
-
-                if err then
-                    table.insert(display_lines, "**Error:** " .. err)
-                    append_stderr_block(display_lines, stderr_output)
-                elseif #response_lines == 0 then
-                    if result.code ~= 0 then
-                        table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
-                        append_stderr_block(display_lines, stderr_output)
-                    else
-                        table.insert(display_lines, "No response received.")
-                        append_stderr_block(display_lines, stderr_output)
-                    end
-                else
-                    vim.list_extend(display_lines, response_lines)
-                end
-
-                -- Update buffer if still valid
                 if vim.api.nvim_buf_is_valid(buf) then
+                    local display_lines = vim.deepcopy(full_header)
+                    table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(user_config.timeout_ms / 1000) .. " seconds")
+                    append_stderr_block(display_lines, stderr_output)
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+                    -- Save session even on timeout (only if we have a session ID)
+                    if current_session_id then
+                        save_session(current_session_id, table.concat(display_lines, "\n"))
+                    end
                 end
+            end)
+        end
 
-                -- Save session to file (only if we have a CLI session ID)
-                if current_session_id then
-                    save_session(current_session_id, table.concat(display_lines, "\n"))
+        local function execute()
+            -- Start run timer
+            run_start_time = vim.loop.now()
+
+            -- Only start timeout timer if timeout_ms is not -1
+            if user_config.timeout_ms ~= -1 then
+                vim.fn.timer_start(user_config.timeout_ms, function()
+                    if is_running then
+                        handle_timeout()
+                    end
+                end)
+            end
+
+            -- Use streaming stdout handler
+            system_obj = vim.system(cmd, {
+                cwd = get_cwd(),
+                stdout = function(err, data)
+                    if data then
+                        vim.schedule(function()
+                            -- Parse incoming data line by line
+                            for line in data:gmatch("[^\r\n]+") do
+                                table.insert(json_lines, line)
+                            end
+                            update_display()
+                        end)
+                    end
+                end,
+                stderr = function(err, data)
+                    if data then
+                        vim.schedule(function()
+                            for line in data:gmatch("[^\r\n]+") do
+                                table.insert(stderr_output, line)
+                            end
+                        end)
+                    end
+                end,
+            }, function(result)
+                vim.schedule(function()
+                    is_running = false
+                    if update_timer then
+                        vim.fn.timer_stop(update_timer)
+                        update_timer = nil
+                    end
+
+                    -- Unregister the request
+                    if request_id then
+                        unregister_request(request_id)
+                    end
+
+                    -- Final update
+                    local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
+                    local display_lines = vim.deepcopy(full_header)
+
+                    -- Ensure we have the CLI session ID for saving
+                    if final_cli_session_id and not current_session_id then
+                        current_session_id = final_cli_session_id
+                        vim.b[buf].opencode_session_id = current_session_id
+                    end
+
+                    if err then
+                        table.insert(display_lines, "**Error:** " .. err)
+                        append_stderr_block(display_lines, stderr_output)
+                    elseif #response_lines == 0 then
+                        if result.code ~= 0 then
+                            table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
+                            append_stderr_block(display_lines, stderr_output)
+                        else
+                            table.insert(display_lines, "No response received.")
+                            append_stderr_block(display_lines, stderr_output)
+                        end
+                    else
+                        vim.list_extend(display_lines, response_lines)
+                    end
+
+                    -- Update buffer if still valid
+                    if vim.api.nvim_buf_is_valid(buf) then
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+                    end
+
+                    -- Save session to file (only if we have a CLI session ID)
+                    if current_session_id then
+                        save_session(current_session_id, table.concat(display_lines, "\n"))
+                    end
+                end)
+            end)
+
+            -- Register request for cancellation tracking
+            local cleanup_fn = function()
+                is_running = false
+                if update_timer then
+                    vim.fn.timer_stop(update_timer)
+                    update_timer = nil
+                end
+            end
+            request_id = register_request(system_obj, cleanup_fn)
+
+            -- Set up autocmd to kill process if buffer is deleted
+            vim.api.nvim_create_autocmd("BufDelete", {
+                buffer = buf,
+                once = true,
+                callback = function()
+                    if system_obj and is_running then
+                        pcall(function() system_obj:kill(9) end)
+                    end
+                    if update_timer then
+                        vim.fn.timer_stop(update_timer)
+                    end
+                    if request_id then
+                        unregister_request(request_id)
+                    end
+                end,
+            })
+        end
+
+        -- Start spinner and execute immediately
+        update_display()
+        start_update_timer()
+        execute()
+    end
+
+    -- Execute based on mode
+    if mode == "agentic" then
+        -- Show "starting server" message in buffer
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+            "**Mode:** [agentic]",
+            "",
+            "Starting opencode server... " .. SPINNER_FRAMES[1],
+        })
+
+        -- Ensure server is running, then execute
+        ensure_server_running(function(success, url_or_error)
+            vim.schedule(function()
+                if success then
+                    execute_opencode(url_or_error)
+                else
+                    -- Server failed to start
+                    if vim.api.nvim_buf_is_valid(buf) then
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+                            "**Mode:** [agentic]",
+                            "",
+                            "**Error:** Failed to start opencode server",
+                            "",
+                            "```",
+                            tostring(url_or_error),
+                            "```",
+                            "",
+                            "Try switching to quick mode with `:OCMode quick` or check server logs.",
+                        })
+                    end
                 end
             end)
         end)
-
-        -- Register request for cancellation tracking
-        local cleanup_fn = function()
-            is_running = false
-            if update_timer then
-                vim.fn.timer_stop(update_timer)
-                update_timer = nil
-            end
-        end
-        request_id = register_request(system_obj, cleanup_fn)
-
-        -- Set up autocmd to kill process if buffer is deleted
-        vim.api.nvim_create_autocmd("BufDelete", {
-            buffer = buf,
-            once = true,
-            callback = function()
-                if system_obj and is_running then
-                    pcall(function() system_obj:kill(9) end)
-                end
-                if update_timer then
-                    vim.fn.timer_stop(update_timer)
-                end
-                if request_id then
-                    unregister_request(request_id)
-                end
-            end,
-        })
+    else
+        -- Quick mode: execute immediately
+        execute_opencode(nil)
     end
-
-    -- Start spinner and execute immediately
-    update_display()
-    start_update_timer()
-    execute()
 end
 
 -- =============================================================================
@@ -1393,8 +1696,9 @@ local function get_session_display()
 end
 
 local function get_window_title(content, show_session)
-    local mode = (content and content:match("#plan")) and "plan" or "build"
-    local title = " OpenCode [" .. mode .. "] [" .. get_model_display() .. "]"
+    local agent_mode = (content and content:match("#plan")) and "plan" or "build"
+    local project_mode = get_project_mode()
+    local title = " OpenCode [" .. agent_mode .. "] [" .. project_mode .. "] [" .. get_model_display() .. "]"
     if show_session and current_session_id then
         title = title .. " [" .. get_session_display() .. "]"
     end
@@ -2023,6 +2327,122 @@ M.GetActiveRequestCount = function()
 end
 
 -- =============================================================================
+-- Mode Management
+-- =============================================================================
+
+--- Get the current project mode
+---@return string mode "quick" or "agentic"
+M.GetMode = function()
+    return get_project_mode()
+end
+
+--- Set the project mode
+---@param mode? string "quick" or "agentic" (if nil, toggle)
+M.SetMode = function(mode)
+    local current = get_project_mode()
+    if not mode then
+        -- Toggle
+        mode = current == "quick" and "agentic" or "quick"
+    end
+    
+    if set_project_mode(mode) then
+        vim.notify("OpenCode mode set to: " .. mode, vim.log.levels.INFO)
+        
+        -- If switching away from agentic mode, optionally stop the server
+        if mode == "quick" then
+            local server = get_server_for_cwd()
+            if server then
+                vim.notify("Note: Server still running. Use :OCServerStop to stop it.", vim.log.levels.INFO)
+            end
+        end
+    end
+end
+
+--- Get server status for current project
+---@return table status { running, port, url }
+M.GetServerStatus = function()
+    local server = get_server_for_cwd()
+    if server then
+        return {
+            running = true,
+            port = server.port,
+            url = server.url,
+        }
+    end
+    return { running = false }
+end
+
+--- Show server status
+M.ServerStatus = function()
+    local server = get_server_for_cwd()
+    local mode = get_project_mode()
+    
+    if server then
+        vim.notify(string.format(
+            "OpenCode Server Status:\n  Mode: %s\n  Status: Running\n  URL: %s\n  Port: %d",
+            mode, server.url, server.port
+        ), vim.log.levels.INFO)
+    else
+        vim.notify(string.format(
+            "OpenCode Server Status:\n  Mode: %s\n  Status: Not running",
+            mode
+        ), vim.log.levels.INFO)
+    end
+end
+
+--- Start the server for current project
+M.ServerStart = function()
+    local server = get_server_for_cwd()
+    if server then
+        vim.notify("Server already running at " .. server.url, vim.log.levels.INFO)
+        return
+    end
+    
+    vim.notify("Starting opencode server...", vim.log.levels.INFO)
+    start_server_for_cwd(function(success, url_or_error)
+        vim.schedule(function()
+            if success then
+                vim.notify("Server started at " .. url_or_error, vim.log.levels.INFO)
+            else
+                vim.notify("Failed to start server: " .. tostring(url_or_error), vim.log.levels.ERROR)
+            end
+        end)
+    end)
+end
+
+--- Stop the server for current project
+M.ServerStop = function()
+    if stop_server_for_cwd() then
+        vim.notify("Server stopped", vim.log.levels.INFO)
+    else
+        vim.notify("No server running", vim.log.levels.INFO)
+    end
+end
+
+--- Restart the server for current project
+M.ServerRestart = function()
+    local was_running = stop_server_for_cwd()
+    if was_running then
+        vim.notify("Restarting opencode server...", vim.log.levels.INFO)
+    else
+        vim.notify("Starting opencode server...", vim.log.levels.INFO)
+    end
+    
+    -- Small delay to ensure cleanup
+    vim.defer_fn(function()
+        start_server_for_cwd(function(success, url_or_error)
+            vim.schedule(function()
+                if success then
+                    vim.notify("Server started at " .. url_or_error, vim.log.levels.INFO)
+                else
+                    vim.notify("Failed to start server: " .. tostring(url_or_error), vim.log.levels.ERROR)
+                end
+            end)
+        end)
+    end, 500)
+end
+
+-- =============================================================================
 -- Commands & Keymaps
 -- =============================================================================
 
@@ -2106,6 +2526,53 @@ local function setup_commands()
     vim.api.nvim_create_user_command("OCAttachWindow", function()
         M.AttachWindow()
     end, { nargs = 0 })
+
+    -- Mode management (quick/agentic toggle)
+    vim.api.nvim_create_user_command("OpenCodeMode", function(opts)
+        local arg = opts.args and opts.args ~= "" and opts.args or nil
+        M.SetMode(arg)
+    end, { 
+        nargs = "?",
+        complete = function() return { "quick", "agentic" } end,
+        desc = "Toggle or set OpenCode mode (quick/agentic)",
+    })
+    vim.api.nvim_create_user_command("OCMode", function(opts)
+        local arg = opts.args and opts.args ~= "" and opts.args or nil
+        M.SetMode(arg)
+    end, { 
+        nargs = "?",
+        complete = function() return { "quick", "agentic" } end,
+        desc = "Toggle or set OpenCode mode (quick/agentic)",
+    })
+
+    -- Server management
+    vim.api.nvim_create_user_command("OpenCodeServerStatus", function()
+        M.ServerStatus()
+    end, { nargs = 0, desc = "Show OpenCode server status" })
+    vim.api.nvim_create_user_command("OCServerStatus", function()
+        M.ServerStatus()
+    end, { nargs = 0, desc = "Show OpenCode server status" })
+
+    vim.api.nvim_create_user_command("OpenCodeServerStart", function()
+        M.ServerStart()
+    end, { nargs = 0, desc = "Start OpenCode server" })
+    vim.api.nvim_create_user_command("OCServerStart", function()
+        M.ServerStart()
+    end, { nargs = 0, desc = "Start OpenCode server" })
+
+    vim.api.nvim_create_user_command("OpenCodeServerStop", function()
+        M.ServerStop()
+    end, { nargs = 0, desc = "Stop OpenCode server" })
+    vim.api.nvim_create_user_command("OCServerStop", function()
+        M.ServerStop()
+    end, { nargs = 0, desc = "Stop OpenCode server" })
+
+    vim.api.nvim_create_user_command("OpenCodeServerRestart", function()
+        M.ServerRestart()
+    end, { nargs = 0, desc = "Restart OpenCode server" })
+    vim.api.nvim_create_user_command("OCServerRestart", function()
+        M.ServerRestart()
+    end, { nargs = 0, desc = "Restart OpenCode server" })
 end
 
 local function setup_keymaps()
@@ -2169,13 +2636,21 @@ function M.setup(opts)
     setup_keymaps()
     setup_auto_reload()
 
-    -- Clean up active requests when Vim exits
+    -- Clean up active requests and servers when Vim exits
     vim.api.nvim_create_autocmd("VimLeavePre", {
         callback = function()
-            local count = cancel_all_requests()
-            if count > 0 then
+            local request_count = cancel_all_requests()
+            local server_count = stop_all_servers()
+            if request_count > 0 or server_count > 0 then
                 -- Brief message - Vim is exiting anyway
-                print("OpenCode: Stopped " .. count .. " active request(s)")
+                local parts = {}
+                if request_count > 0 then
+                    table.insert(parts, request_count .. " request(s)")
+                end
+                if server_count > 0 then
+                    table.insert(parts, server_count .. " server(s)")
+                end
+                print("OpenCode: Stopped " .. table.concat(parts, " and "))
             end
         end,
     })
