@@ -4,6 +4,14 @@ local M = {}
 -- Server Module
 -- =============================================================================
 -- Server management for agentic mode in opencode.nvim
+--
+-- This module manages the local opencode server process that runs in the
+-- background. When running in "agentic" mode, requests are sent to this
+-- server using `opencode run --attach <url>` as per the documentation:
+-- https://opencode.ai/docs/cli/#attach
+--
+-- The server is started via `opencode serve --port <port> --hostname <hostname>`
+-- and kept running to avoid MCP server cold boot times on every request.
 
 local config = require("opencode.config")
 

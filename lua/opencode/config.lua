@@ -43,7 +43,12 @@ M.defaults = {
     -- MD files to auto-discover up the directory tree (like AGENT.md)
     -- These files provide hierarchical context to the AI
     md_files = { "AGENT.md", "AGENTS.md" },
-    -- Mode: "quick" (one-shot, files via --file) or "agentic" (server mode with full tool access)
+    -- Mode: "quick" or "agentic"
+    -- - "quick": Uses `opencode run` directly for one-shot queries with files via --file
+    -- - "agentic": Starts a local server via `opencode serve` and uses
+    --              `opencode run --attach <url>` to connect to it. This avoids
+    --              MCP server cold boot times on every request.
+    --              See: https://opencode.ai/docs/cli/#attach
     mode = "quick",
     -- Server settings for agentic mode
     server = {
