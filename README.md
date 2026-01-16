@@ -6,15 +6,16 @@ A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, al
 
 - **🪟 Floating Prompt Window**: Clean, centered floating window for sending prompts to AI assistants
 - **📝 Visual Selection Support**: Include code selections in your prompts (automatically wrapped in markdown code fences)
-- **🤖 Dual Agent Modes**: 
-  - `build` mode - Code generation and implementation (default)
-  - `plan` mode - Task planning and strategizing
+- **🤖 Dual Execution Modes**: 
+  - `quick` mode - Direct CLI calls for fast, simple queries (default)
+  - `agentic` mode - Server-based execution for complex, multi-step tasks
 - **🎯 Model Selection**: Choose from available AI models via Telescope picker with persistent preferences
 - **🔍 Git Review Integration**: Review commits, branches, and diffs with AI assistance
 - **⚡ Streaming Responses**: Real-time response display with markdown syntax highlighting
 - **📋 Todo List Display**: View OpenCode's task planning and progress directly in the response buffer
 - **📂 File References**: Use `@` trigger to quickly reference files in your prompts
 - **💾 Draft Persistence**: Unsaved prompts are preserved when closing the prompt window
+- **🔄 Session Management**: Continue previous conversations with `#session` markers
 
 ## 📋 Requirements
 
@@ -121,6 +122,9 @@ vim.keymap.set("n", "<leader>ai", "<Cmd>OpenCode<CR>", { desc = "Open OpenCode" 
 vim.keymap.set("v", "<leader>ai", "<Cmd>OpenCodeWSelection<CR>", { desc = "OpenCode with selection" })
 vim.keymap.set("n", "<leader>am", "<Cmd>OpenCodeModel<CR>", { desc = "Select AI model" })
 vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review git changes" })
+vim.keymap.set("n", "<leader>as", "<Cmd>OpenCodeSessions<CR>", { desc = "Browse sessions" })
+vim.keymap.set("n", "<leader>ax", "<Cmd>OpenCodeStop<CR>", { desc = "Stop active requests" })
+vim.keymap.set("n", "<leader>at", "<Cmd>OpenCodeCLI<CR>", { desc = "Toggle response buffer" })
 ```
 
 ### Configuration Options
@@ -138,7 +142,9 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 
 ## 🚀 Usage
 
-### Commands
+### Commands (`:` Commands)
+
+All commands have both a full name and a short abbreviation:
 
 | Command | Abbreviation | Description |
 |---------|-------------|-------------|
@@ -149,6 +155,13 @@ vim.keymap.set("n", "<leader>ar", "<Cmd>OpenCodeReview<CR>", { desc = "Review gi
 | `:OpenCodeCLI` | `:OCCLI` | Toggle the response buffer visibility |
 | `:OpenCodeSessions` | `:OCSessions` | Open session picker to view/manage saved sessions |
 | `:OpenCodeInit` | `:OCInit` | Initialize opencode for the current project (creates AGENTS.md) |
+| `:OpenCodeStop` | `:OCStop` | Stop all active AI requests |
+| `:OpenCodeAttachWindow` | `:OCAttachWindow` | Attach the floating prompt to a regular split window |
+| `:OpenCodeMode [mode]` | `:OCMode [mode]` | Toggle or set mode (`quick` or `agentic`). Omit argument to toggle. |
+| `:OpenCodeServerStatus` | `:OCServerStatus` | Show the status of the opencode server (agentic mode) |
+| `:OpenCodeServerStart` | `:OCServerStart` | Start the opencode server for agentic mode |
+| `:OpenCodeServerStop` | `:OCServerStop` | Stop the opencode server |
+| `:OpenCodeServerRestart` | `:OCServerRestart` | Restart the opencode server |
 
 ### Default Keymaps
 
@@ -168,17 +181,21 @@ Inside the OpenCode prompt window:
 | `:w` or `:wq` | Submit the prompt to AI |
 | `q` or `<Esc>` | Close without submitting (saves draft) |
 | `@` | Trigger Telescope file picker to insert file reference |
-| `<Space>` (after `#buffer` or `#buf`) | Auto-expand to current file path |
+| `<C-x><C-e>` | Attach the floating prompt to a regular split window |
 
-### Special Markers
+### Special Markers (`#` Commands)
 
 Use these markers in your prompts for additional functionality:
 
 | Marker | Description | Example |
 |--------|-------------|---------|
 | `#plan` | Switch to plan mode for task planning | `#plan How should I architect this feature?` |
-| `#buffer` or `#buf` | Reference the current file | `Refactor #buffer to use async/await` |
-| `@` (in prompt) | Opens file picker to reference any file | Type `@` then select file from Telescope |
+| `#buffer` or `#buf` | Reference the current file (auto-expands to file path) | `Refactor #buffer to use async/await` |
+| `#session` | Open session picker to continue a previous session | Type `#session` to select from saved sessions |
+| `#session(<id>)` | Continue a specific session by ID | `#session(ses_abc123) Follow up on that...` |
+| `#agentic` | Switch to agentic mode (uses server for requests) | `#agentic Implement this complex feature` |
+| `#quick` | Switch to quick mode (direct CLI calls) | `#quick Just explain this code` |
+| `@` | Opens Telescope file picker to reference any file | Type `@` then select file from picker |
 
 ### Code Review
 
@@ -228,6 +245,17 @@ Refactor @src/utils.lua and @src/helpers.lua to reduce duplication
 ```
 *(Use `@` to trigger file picker for each file)*
 
+**Continuing a session:**
+```
+#session
+```
+*(Opens session picker to select a previous conversation)*
+
+**Switching to agentic mode for complex tasks:**
+```
+#agentic Implement a complete user authentication system with tests
+```
+
 **Git review:**
 ```vim
 :OpenCodeReview
@@ -235,6 +263,53 @@ Refactor @src/utils.lua and @src/helpers.lua to reduce duplication
 HEAD~5
 ```
 The AI will review your last 5 commits and provide feedback.
+
+**Stop an active request:**
+```vim
+:OCStop
+```
+
+## 🔀 Execution Modes
+
+OpenCode supports two execution modes that determine how requests are processed:
+
+### Quick Mode (Default)
+- Direct CLI calls to the `opencode` command
+- Best for simple queries, quick questions, and one-off tasks
+- Lower latency for simple requests
+- Each request is independent
+
+### Agentic Mode
+- Uses a persistent opencode server for request handling
+- Best for complex, multi-step tasks that benefit from context
+- Server starts automatically when needed (or manually with `:OCServerStart`)
+- Maintains state across requests within the same server session
+
+### Switching Modes
+
+**Via Command:**
+```vim
+:OCMode quick      " Switch to quick mode
+:OCMode agentic    " Switch to agentic mode
+:OCMode            " Toggle between modes
+```
+
+**Via Prompt Marker:**
+```
+#agentic Implement this complex feature with tests
+#quick Just explain what this function does
+```
+
+### Server Management (Agentic Mode)
+
+When using agentic mode, you can manage the server:
+
+| Command | Description |
+|---------|-------------|
+| `:OCServerStatus` | Check if server is running and get URL |
+| `:OCServerStart` | Manually start the server |
+| `:OCServerStop` | Stop the server |
+| `:OCServerRestart` | Restart the server |
 
 ## 💾 Session Management
 
@@ -246,9 +321,14 @@ OpenCode provides comprehensive session management to maintain conversation cont
 - **Response Buffer**: Active sessions display in a dedicated vertical split buffer with syntax highlighting
 
 ### Continuing Sessions
-Use the `#session(<id>)` syntax in prompts to continue existing conversations. The session ID is the opencode CLI session ID (starts with `ses_`):
 
-```lua
+**Using the `#session` marker** in the prompt window:
+1. Type `#session` (without parentheses) to open the session picker
+2. Select a previous session to continue, or start a new one
+3. The session ID is automatically inserted as `#session(<id>)`
+
+**Using a specific session ID:**
+```
 #session(ses_abc123def456) How should we optimize this function further?
 ```
 
