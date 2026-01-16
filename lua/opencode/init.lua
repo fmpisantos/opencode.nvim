@@ -1512,6 +1512,22 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
             title_pos = "center",
         })
     else
+        -- Delete any existing prompt buffer to avoid "buffer already exists" errors
+        -- This includes the recovered prompt_buf and any buffer with the same name
+        if prompt_buf and vim.api.nvim_buf_is_valid(prompt_buf) then
+            -- Set bufhidden to wipe before deletion to ensure it's fully removed
+            pcall(function() vim.bo[prompt_buf].bufhidden = "wipe" end)
+            pcall(vim.api.nvim_buf_delete, prompt_buf, { force = true })
+            prompt_buf = nil
+        end
+        -- Also check by name in case prompt_buf wasn't set but buffer exists
+        local existing_buf = vim.fn.bufnr("opencode://prompt")
+        if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
+            -- Set bufhidden to wipe before deletion to ensure it's fully removed
+            pcall(function() vim.bo[existing_buf].bufhidden = "wipe" end)
+            pcall(vim.api.nvim_buf_delete, existing_buf, { force = true })
+        end
+
         -- Create new buffer and window
         buf = vim.api.nvim_create_buf(false, true)
         win = vim.api.nvim_open_win(buf, true, {
@@ -1532,7 +1548,14 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         vim.bo[buf].swapfile = false -- Prevent swap file creation
         vim.bo[buf].buflisted = false -- Don't show in buffer list
         -- Use URI scheme to prevent Neovim from treating this as a file path
-        vim.api.nvim_buf_set_name(buf, "opencode://prompt")
+        -- Check if name is available first to avoid E95 error
+        local name_buf = vim.fn.bufnr("opencode://prompt")
+        if name_buf == -1 or not vim.api.nvim_buf_is_valid(name_buf) then
+            vim.api.nvim_buf_set_name(buf, "opencode://prompt")
+        else
+            -- If another buffer still has this name (shouldn't happen), use a unique name
+            vim.api.nvim_buf_set_name(buf, "opencode://prompt-" .. buf)
+        end
     end
 
     -- Track prompt buffer and window in module state
