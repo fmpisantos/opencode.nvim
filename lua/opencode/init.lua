@@ -1466,6 +1466,15 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
     -- Check if we have an existing prompt buffer that's valid and displayed in a non-floating window
     local reuse_existing_buffer = false
+
+    -- Recover prompt_buf if module state was lost but buffer still exists (e.g., after plugin reload)
+    if not prompt_buf or not vim.api.nvim_buf_is_valid(prompt_buf) then
+        local existing_buf = vim.fn.bufnr("opencode://prompt")
+        if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
+            prompt_buf = existing_buf
+        end
+    end
+
     if prompt_buf and vim.api.nvim_buf_is_valid(prompt_buf) then
         local wins = vim.fn.win_findbuf(prompt_buf)
         for _, w in ipairs(wins) do
