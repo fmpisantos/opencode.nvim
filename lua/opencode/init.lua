@@ -58,6 +58,10 @@ local current_session_name = nil
 local response_buf = nil
 local response_win = nil
 
+-- Prompt window state (for attach functionality)
+local prompt_buf = nil
+local prompt_win = nil
+
 -- Active requests tracking (for cancellation)
 local active_requests = {} -- table of { id = { system_obj, cleanup_fn } }
 local next_request_id = 0
@@ -194,15 +198,12 @@ local function start_new_session()
 end
 
 --- Clear current session (for new prompt via <leader>oc)
+--- Note: This no longer closes the response buffer to preserve user's view
 local function clear_session()
     current_session_id = nil
     current_session_name = nil
-    -- Close existing response buffer if any
-    if response_buf and vim.api.nvim_buf_is_valid(response_buf) then
-        vim.api.nvim_buf_delete(response_buf, { force = true })
-    end
-    response_buf = nil
-    response_win = nil
+    -- Don't close response buffer - user may want to keep it visible
+    -- The response buffer will be reused or a new one created when needed
 end
 
 -- =============================================================================
@@ -1463,51 +1464,108 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
     -- Clear session state (we'll use #session(<id>) in the prompt instead)
     clear_session()
 
-    local buf, win = create_floating_window({
-        width = user_config.prompt_window.width,
-        height = user_config.prompt_window.height,
-        title = get_window_title(nil, session_to_use ~= nil),
-        filetype = "opencode",
-        name = "OpenCode Prompt",
-    })
+    -- Check if we have an existing prompt buffer that's valid and displayed in a non-floating window
+    local reuse_existing_buffer = false
+    if prompt_buf and vim.api.nvim_buf_is_valid(prompt_buf) then
+        local wins = vim.fn.win_findbuf(prompt_buf)
+        for _, w in ipairs(wins) do
+            local win_config = vim.api.nvim_win_get_config(w)
+            if win_config.relative == "" then
+                -- Buffer is displayed in a regular (non-floating) window
+                -- Close that window and open in floating mode
+                vim.api.nvim_win_close(w, false)
+            end
+        end
+        -- Reuse the buffer if it has content and no initial_prompt is provided
+        if not initial_prompt then
+            local lines = vim.api.nvim_buf_get_lines(prompt_buf, 0, -1, false)
+            local has_content = vim.iter(lines):any(function(line) return line ~= "" end)
+            if has_content then
+                reuse_existing_buffer = true
+            end
+        end
+    end
+
+    local buf, win
+
+    if reuse_existing_buffer and prompt_buf and vim.api.nvim_buf_is_valid(prompt_buf) then
+        -- Reuse existing buffer, just create new floating window
+        buf = prompt_buf
+        win = vim.api.nvim_open_win(buf, true, {
+            relative = "editor",
+            width = user_config.prompt_window.width,
+            height = user_config.prompt_window.height,
+            col = (vim.o.columns - user_config.prompt_window.width) / 2,
+            row = (vim.o.lines - user_config.prompt_window.height) / 2,
+            style = "minimal",
+            border = "rounded",
+            title = get_window_title(nil, session_to_use ~= nil),
+            title_pos = "center",
+        })
+    else
+        -- Create new buffer and window
+        buf = vim.api.nvim_create_buf(false, true)
+        win = vim.api.nvim_open_win(buf, true, {
+            relative = "editor",
+            width = user_config.prompt_window.width,
+            height = user_config.prompt_window.height,
+            col = (vim.o.columns - user_config.prompt_window.width) / 2,
+            row = (vim.o.lines - user_config.prompt_window.height) / 2,
+            style = "minimal",
+            border = "rounded",
+            title = get_window_title(nil, session_to_use ~= nil),
+            title_pos = "center",
+        })
+
+        vim.bo[buf].buftype = "acwrite"
+        vim.bo[buf].bufhidden = "hide" -- Changed from "wipe" to allow buffer reuse
+        vim.bo[buf].filetype = "opencode"
+        vim.api.nvim_buf_set_name(buf, "OpenCode Prompt")
+    end
+
+    -- Track prompt buffer and window in module state
+    prompt_buf = buf
+    prompt_win = win
 
     vim.b[buf].opencode_source_file = source_file
 
-    -- Setup initial content
-    if initial_prompt then
-        draft_content = nil
-        draft_cursor = nil
-        local initial_lines = {}
-        -- Add session reference if continuing a session
-        if session_to_use then
-            table.insert(initial_lines, "#session(" .. session_to_use .. ")")
+    -- Setup initial content (only if not reusing existing buffer)
+    if not reuse_existing_buffer then
+        if initial_prompt then
+            draft_content = nil
+            draft_cursor = nil
+            local initial_lines = {}
+            -- Add session reference if continuing a session
+            if session_to_use then
+                table.insert(initial_lines, "#session(" .. session_to_use .. ")")
+            end
+            -- Add #buffer reference if we have a source file
+            if source_file and source_file ~= "" then
+                table.insert(initial_lines, "#buffer")
+            end
+            table.insert(initial_lines, "```" .. filetype)
+            vim.list_extend(initial_lines, initial_prompt)
+            vim.list_extend(initial_lines, { "```", "" })
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
+            vim.api.nvim_win_set_cursor(win, { #initial_lines, 0 })
+        elseif draft_content then
+            -- If we have draft content but need to add session reference
+            local lines_to_set = vim.deepcopy(draft_content)
+            if session_to_use and not has_session_reference(table.concat(lines_to_set, "\n")) then
+                table.insert(lines_to_set, 1, "#session(" .. session_to_use .. ")")
+            end
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines_to_set)
+            if draft_cursor then
+                -- Adjust cursor if we inserted a session line
+                local row_offset = (session_to_use and not has_session_reference(table.concat(draft_content, "\n"))) and 1 or
+                    0
+                pcall(vim.api.nvim_win_set_cursor, win, { draft_cursor[1] + row_offset, draft_cursor[2] })
+            end
+        elseif session_to_use then
+            -- No draft, but we need to add session reference
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "#session(" .. session_to_use .. ")", "" })
+            vim.api.nvim_win_set_cursor(win, { 2, 0 })
         end
-        -- Add #buffer reference if we have a source file
-        if source_file and source_file ~= "" then
-            table.insert(initial_lines, "#buffer")
-        end
-        table.insert(initial_lines, "```" .. filetype)
-        vim.list_extend(initial_lines, initial_prompt)
-        vim.list_extend(initial_lines, { "```", "" })
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
-        vim.api.nvim_win_set_cursor(win, { #initial_lines, 0 })
-    elseif draft_content then
-        -- If we have draft content but need to add session reference
-        local lines_to_set = vim.deepcopy(draft_content)
-        if session_to_use and not has_session_reference(table.concat(lines_to_set, "\n")) then
-            table.insert(lines_to_set, 1, "#session(" .. session_to_use .. ")")
-        end
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines_to_set)
-        if draft_cursor then
-            -- Adjust cursor if we inserted a session line
-            local row_offset = (session_to_use and not has_session_reference(table.concat(draft_content, "\n"))) and 1 or
-                0
-            pcall(vim.api.nvim_win_set_cursor, win, { draft_cursor[1] + row_offset, draft_cursor[2] })
-        end
-    elseif session_to_use then
-        -- No draft, but we need to add session reference
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "#session(" .. session_to_use .. ")", "" })
-        vim.api.nvim_win_set_cursor(win, { 2, 0 })
     end
 
     vim.cmd("startinsert")
@@ -1541,7 +1599,8 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
                     draft_cursor = cursor_pos
 
                     -- Close prompt window and open session picker
-                    vim.api.nvim_win_close(win, true)
+                    vim.api.nvim_win_close(win, false)
+                    prompt_win = nil
                     select_session_for_prompt(source_file)
                     return
                 end
@@ -1577,7 +1636,17 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
         draft_content = nil
         draft_cursor = nil
-        vim.api.nvim_win_close(win, true)
+
+        -- Close the window but keep the buffer
+        if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, false)
+        end
+        prompt_win = nil
+
+        -- Clear the prompt buffer content after submission
+        if vim.api.nvim_buf_is_valid(buf) then
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+        end
 
         if content and vim.trim(content) ~= "" then
             run_opencode(content, files_to_attach, source_file)
@@ -1597,7 +1666,30 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
             draft_content = nil
             draft_cursor = nil
         end
-        vim.api.nvim_win_close(win, true)
+
+        -- Close the window but keep the buffer
+        if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, false)
+        end
+        prompt_win = nil
+    end
+
+    local function attach_to_window()
+        -- Close the floating window
+        if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, false)
+        end
+        prompt_win = nil
+
+        -- Open the buffer in a new split window
+        vim.cmd("split")
+        local new_win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(new_win, buf)
+
+        -- Set window height to something reasonable
+        vim.api.nvim_win_set_height(new_win, user_config.prompt_window.height + 5)
+
+        vim.notify("Prompt attached to window. Use :OpenCode to return to floating mode.", vim.log.levels.INFO)
     end
 
     -- Keymaps
@@ -1612,6 +1704,10 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
     vim.keymap.set("n", "q", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
     vim.keymap.set("n", "<Esc>", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
+
+    -- Keymap to attach floating window to a regular window
+    vim.keymap.set({ "n", "i" }, "<C-x><C-e>", attach_to_window,
+        { buffer = buf, noremap = true, silent = true, desc = "Attach prompt to window" })
 end
 
 -- =============================================================================
@@ -1817,6 +1913,32 @@ M.ToggleCLI = function()
     toggle_response_buffer()
 end
 
+--- Attach the prompt floating window to a regular (non-floating) window
+--- The buffer content will be the same, allowing editing in either window
+M.AttachWindow = function()
+    -- Check if we have a valid prompt buffer
+    if not prompt_buf or not vim.api.nvim_buf_is_valid(prompt_buf) then
+        vim.notify("No OpenCode prompt window to attach", vim.log.levels.WARN)
+        return
+    end
+
+    -- Close the floating window if it's open
+    if prompt_win and vim.api.nvim_win_is_valid(prompt_win) then
+        vim.api.nvim_win_close(prompt_win, false)
+        prompt_win = nil
+    end
+
+    -- Open the buffer in a new split window
+    vim.cmd("split")
+    local new_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(new_win, prompt_buf)
+
+    -- Set window height to something reasonable
+    vim.api.nvim_win_set_height(new_win, user_config.prompt_window.height + 5)
+
+    vim.notify("Prompt attached to window. Use :OpenCode to return to floating mode.", vim.log.levels.INFO)
+end
+
 --- Initialize opencode project (runs init command)
 M.Init = function()
     run_opencode_command("init", nil)
@@ -1913,6 +2035,14 @@ local function setup_commands()
     end, { nargs = 0 })
     vim.api.nvim_create_user_command("OCStop", function()
         M.StopAll()
+    end, { nargs = 0 })
+
+    -- Attach prompt to window
+    vim.api.nvim_create_user_command("OpenCodeAttachWindow", function()
+        M.AttachWindow()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCAttachWindow", function()
+        M.AttachWindow()
     end, { nargs = 0 })
 end
 
