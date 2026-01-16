@@ -356,6 +356,9 @@ local function build_opencode_cmd(base_args, prompt, files)
         end
     end
     if prompt then
+        -- Use -- to separate options from the positional message argument
+        -- This prevents the CLI from interpreting the message as file paths
+        table.insert(cmd, "--")
         table.insert(cmd, prompt)
     end
     return cmd
