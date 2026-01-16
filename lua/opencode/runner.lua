@@ -14,6 +14,167 @@ local response = require("opencode.response")
 local server = require("opencode.server")
 
 -- =============================================================================
+-- HTTP API Helper for Agentic Mode
+-- =============================================================================
+
+--- Create a new session via HTTP API
+---@param server_url string Server URL
+---@param callback function Called with (success, session_id_or_error)
+local function create_session_http(server_url, callback)
+    local curl_cmd = {
+        "curl", "-s", "-X", "POST",
+        server_url .. "/session",
+        "-H", "Content-Type: application/json",
+        "-d", "{}"
+    }
+
+    vim.system(curl_cmd, { text = true }, function(result)
+        vim.schedule(function()
+            if result.code ~= 0 then
+                callback(false, "Failed to create session: " .. (result.stderr or "unknown error"))
+                return
+            end
+
+            local ok, data = pcall(vim.json.decode, result.stdout)
+            if ok and data and data.id then
+                callback(true, data.id)
+            else
+                callback(false, "Invalid response from server")
+            end
+        end)
+    end)
+end
+
+--- Post a message via HTTP API and stream the response
+---@param server_url string Server URL
+---@param session_id string Session ID
+---@param prompt string The prompt to send
+---@param agent string Agent to use ("build" or "plan")
+---@param on_data function Called with each line of output
+---@param on_complete function Called when complete with (success, error_msg)
+---@return table system_obj The system object for cancellation
+local function post_message_http(server_url, session_id, prompt, agent, on_data, on_complete)
+    -- Build the message payload
+    local payload = {
+        parts = {{ type = "text", text = prompt }},
+        agent = agent,
+    }
+
+    -- Add model if selected
+    local state = config.state
+    if state.selected_model then
+        local provider, model = state.selected_model:match("([^/]+)/(.+)")
+        if provider and model then
+            payload.providerID = provider
+            payload.modelID = model
+        end
+    end
+
+    local payload_json = vim.json.encode(payload)
+    local url = server_url .. "/session/" .. session_id .. "/message"
+
+    -- Use curl with streaming (though the API returns a single response)
+    -- The opencode server returns the full response at once
+    local curl_cmd = {
+        "curl", "-s", "-X", "POST",
+        url,
+        "-H", "Content-Type: application/json",
+        "-d", payload_json
+    }
+
+    local stdout_data = ""
+    local stderr_data = ""
+
+    local system_obj = vim.system(curl_cmd, {
+        text = true,
+        stdout = function(err, data)
+            if data then
+                stdout_data = stdout_data .. data
+            end
+        end,
+        stderr = function(err, data)
+            if data then
+                stderr_data = stderr_data .. data
+            end
+        end,
+    }, function(result)
+        vim.schedule(function()
+            if result.code ~= 0 then
+                on_complete(false, "HTTP request failed: " .. stderr_data)
+                return
+            end
+
+            -- Parse the response
+            local ok, data = pcall(vim.json.decode, stdout_data)
+            if not ok then
+                on_complete(false, "Failed to parse response: " .. stdout_data)
+                return
+            end
+
+            -- Check for error in response
+            if data.info and data.info.error then
+                local err = data.info.error
+                local err_msg = err.data and err.data.message or err.message or err.name or "Unknown error"
+                -- Create error event in streaming format
+                local error_event = vim.json.encode({
+                    type = "error",
+                    sessionID = session_id,
+                    error = err
+                })
+                on_data(error_event)
+                on_complete(true, nil) -- Complete without error since we handled it
+                return
+            end
+
+            -- Convert HTTP API response to streaming format for compatibility
+            -- First send step_start
+            local step_start = vim.json.encode({
+                type = "step_start",
+                sessionID = session_id,
+                part = { type = "step-start" }
+            })
+            on_data(step_start)
+
+            -- Send text parts
+            if data.parts then
+                for _, part in ipairs(data.parts) do
+                    if part.type == "text" then
+                        local text_event = vim.json.encode({
+                            type = "text",
+                            sessionID = session_id,
+                            part = {
+                                type = "text",
+                                text = part.text or ""
+                            }
+                        })
+                        on_data(text_event)
+                    elseif part.type == "tool-use" or part.type == "tool_use" then
+                        local tool_event = vim.json.encode({
+                            type = "tool_use",
+                            sessionID = session_id,
+                            part = part
+                        })
+                        on_data(tool_event)
+                    end
+                end
+            end
+
+            -- Send step_finish
+            local step_finish = vim.json.encode({
+                type = "step_finish",
+                sessionID = session_id,
+                part = { type = "step-finish", reason = "stop" }
+            })
+            on_data(step_finish)
+
+            on_complete(true, nil)
+        end)
+    end)
+
+    return system_obj
+end
+
+-- =============================================================================
 -- Run OpenCode
 -- =============================================================================
 
@@ -35,17 +196,44 @@ function M.run_opencode(prompt, files, source_file)
     -- Determine if this is a continuation of an existing session
     local is_continuation = cli_session_id ~= nil
 
+    -- Get current mode (quick or agentic)
+    local mode = config.get_project_mode()
+
     -- Determine agent mode
+    -- In agentic mode, use server's stored agent as default
     local agent = "build"
+    local agent_changed_by_prompt = false
+    if mode == "agentic" then
+        local srv = server.get_server_for_cwd()
+        if srv and srv.agent then
+            agent = srv.agent
+        end
+    end
+    -- #plan in prompt always overrides
     if prompt:match("#plan") then
         agent = "plan"
+        agent_changed_by_prompt = true
         prompt = prompt:gsub("#plan%s*", ""):gsub("%s*#plan", "")
+    -- #build in prompt explicitly sets build mode
+    elseif prompt:match("#build") then
+        agent = "build"
+        agent_changed_by_prompt = true
+        prompt = prompt:gsub("#build%s*", ""):gsub("%s*#build", "")
+    end
+
+    -- Update server agent if it changed (for agentic mode)
+    if mode == "agentic" and agent_changed_by_prompt then
+        server.set_server_agent(agent)
     end
 
     -- Set current session if continuing
     if cli_session_id then
         state.current_session_id = cli_session_id
         state.current_session_name = nil
+        -- Sync session to server in agentic mode
+        if mode == "agentic" then
+            server.set_server_session(cli_session_id)
+        end
     end
 
     -- Get existing content if continuing
@@ -64,9 +252,6 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Update buffer's session id (may be nil for new sessions until we get it from CLI)
     vim.b[buf].opencode_session_id = state.current_session_id
-
-    -- Get current mode (quick or agentic)
-    local mode = config.get_project_mode()
 
     -- Collect all files to attach (only in quick mode - agentic mode reads files itself)
     local all_files = {}
@@ -103,15 +288,38 @@ function M.run_opencode(prompt, files, source_file)
         -- Build command with --session flag if continuing
         local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
 
+        -- Add --model flag if a model is selected
+        -- In agentic mode, use server's stored model; otherwise use global state
+        local model_to_use = state.selected_model
+        if mode == "agentic" then
+            local srv = server.get_server_for_cwd()
+            if srv and srv.model then
+                model_to_use = srv.model
+            end
+        end
+        if model_to_use and model_to_use ~= "" then
+            table.insert(base_cmd, "--model")
+            table.insert(base_cmd, model_to_use)
+        end
+
         -- Add --attach for agentic mode
         if server_url then
             table.insert(base_cmd, "--attach")
             table.insert(base_cmd, server_url)
         end
 
-        if cli_session_id then
+        -- Add --session flag if continuing
+        -- In agentic mode, prefer server's stored session if no explicit session in prompt
+        local session_to_use = cli_session_id
+        if mode == "agentic" and not session_to_use then
+            local srv = server.get_server_for_cwd()
+            if srv and srv.session_id then
+                session_to_use = srv.session_id
+            end
+        end
+        if session_to_use then
             table.insert(base_cmd, "--session")
-            table.insert(base_cmd, cli_session_id)
+            table.insert(base_cmd, session_to_use)
         end
         local cmd = utils.build_opencode_cmd(base_cmd, prompt, all_files)
 
@@ -167,6 +375,10 @@ function M.run_opencode(prompt, files, source_file)
             if new_cli_session_id and not state.current_session_id then
                 state.current_session_id = new_cli_session_id
                 vim.b[buf].opencode_session_id = state.current_session_id
+                -- Sync session to server in agentic mode
+                if mode == "agentic" then
+                    server.set_server_session(new_cli_session_id)
+                end
             end
 
             if is_running then
@@ -311,6 +523,10 @@ function M.run_opencode(prompt, files, source_file)
                     if final_cli_session_id and not state.current_session_id then
                         state.current_session_id = final_cli_session_id
                         vim.b[buf].opencode_session_id = state.current_session_id
+                        -- Sync session to server in agentic mode
+                        if mode == "agentic" then
+                            server.set_server_session(final_cli_session_id)
+                        end
                     end
 
                     if err then

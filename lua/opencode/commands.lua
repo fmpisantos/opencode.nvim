@@ -177,6 +177,30 @@ local function setup_commands(opencode)
     vim.api.nvim_create_user_command("OCServerRestart", function()
         opencode.ServerRestart()
     end, { nargs = 0, desc = "Restart OpenCode server" })
+
+    -- Agent management (build/plan)
+    vim.api.nvim_create_user_command("OpenCodeAgent", function(opts)
+        if opts.args and opts.args ~= "" then
+            opencode.SetAgent(opts.args)
+        else
+            vim.notify("Current agent: " .. opencode.GetAgent(), vim.log.levels.INFO)
+        end
+    end, {
+        nargs = "?",
+        complete = function() return { "build", "plan" } end,
+        desc = "Get or set OpenCode agent (build/plan)",
+    })
+    vim.api.nvim_create_user_command("OCAgent", function(opts)
+        if opts.args and opts.args ~= "" then
+            opencode.SetAgent(opts.args)
+        else
+            vim.notify("Current agent: " .. opencode.GetAgent(), vim.log.levels.INFO)
+        end
+    end, {
+        nargs = "?",
+        complete = function() return { "build", "plan" } end,
+        desc = "Get or set OpenCode agent (build/plan)",
+    })
 end
 
 -- =============================================================================

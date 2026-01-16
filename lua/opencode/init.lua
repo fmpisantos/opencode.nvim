@@ -458,6 +458,8 @@ function M.SelectModel()
                     local model = selection[1]
                     state.selected_model = (model == "(default - no model specified)") and nil or model
                     config.save_config()
+                    -- Sync model to running server in agentic mode
+                    server.set_server_model(state.selected_model)
                     vim.notify("OpenCode model set to: " .. config.get_model_display(), vim.log.levels.INFO)
                 end
             end)
@@ -605,13 +607,22 @@ function M.Init()
     runner.run_opencode_command("init", nil)
 end
 
---- Stop all active requests
+--- Stop all active requests and servers
 function M.StopAll()
-    local count = requests.cancel_all_requests()
-    if count > 0 then
-        vim.notify("Stopped " .. count .. " active request(s)", vim.log.levels.INFO)
+    local request_count = requests.cancel_all_requests()
+    local server_count = server.stop_all_servers()
+
+    if request_count > 0 or server_count > 0 then
+        local parts = {}
+        if request_count > 0 then
+            table.insert(parts, request_count .. " request(s)")
+        end
+        if server_count > 0 then
+            table.insert(parts, server_count .. " server(s)")
+        end
+        vim.notify("Stopped " .. table.concat(parts, " and "), vim.log.levels.INFO)
     else
-        vim.notify("No active requests to stop", vim.log.levels.INFO)
+        vim.notify("No active requests or servers to stop", vim.log.levels.INFO)
     end
 end
 
@@ -643,6 +654,15 @@ function M.SetMode(mode)
     if config.set_project_mode(mode) then
         vim.notify("OpenCode mode set to: " .. mode, vim.log.levels.INFO)
 
+        -- If switching to agentic mode and server is running, sync state
+        if mode == "agentic" then
+            local srv = server.get_server_for_cwd()
+            if srv then
+                -- Sync current global state to server
+                server.sync_state_to_server()
+            end
+        end
+
         -- If switching away from agentic mode, optionally stop the server
         if mode == "quick" then
             local srv = server.get_server_for_cwd()
@@ -653,8 +673,25 @@ function M.SetMode(mode)
     end
 end
 
+--- Get the current agent for the server
+---@return string agent "build" or "plan"
+function M.GetAgent()
+    return server.get_server_agent()
+end
+
+--- Set the agent for the current server
+---@param agent string "build" or "plan"
+function M.SetAgent(agent)
+    if agent ~= "build" and agent ~= "plan" then
+        vim.notify("Invalid agent: " .. tostring(agent) .. ". Use 'build' or 'plan'.", vim.log.levels.ERROR)
+        return
+    end
+    server.set_server_agent(agent)
+    vim.notify("OpenCode agent set to: " .. agent, vim.log.levels.INFO)
+end
+
 --- Get server status for current project
----@return table status { running, port, url }
+---@return table status { running, port, url, agent, model, session_id }
 function M.GetServerStatus()
     local srv = server.get_server_for_cwd()
     if srv then
@@ -662,6 +699,9 @@ function M.GetServerStatus()
             running = true,
             port = srv.port,
             url = srv.url,
+            agent = srv.agent,
+            model = srv.model,
+            session_id = srv.session_id,
         }
     end
     return { running = false }
@@ -673,9 +713,11 @@ function M.ServerStatus()
     local mode = config.get_project_mode()
 
     if srv then
+        local model_display = srv.model or "default"
+        local session_display = srv.session_id and srv.session_id:sub(1, 15) or "none"
         vim.notify(string.format(
-            "OpenCode Server Status:\n  Mode: %s\n  Status: Running\n  URL: %s\n  Port: %d",
-            mode, srv.url, srv.port
+            "OpenCode Server Status:\n  Mode: %s\n  Status: Running\n  URL: %s\n  Port: %d\n  Agent: %s\n  Model: %s\n  Session: %s",
+            mode, srv.url, srv.port, srv.agent or "build", model_display, session_display
         ), vim.log.levels.INFO)
     else
         vim.notify(string.format(
@@ -762,7 +804,8 @@ function M.setup(opts)
     vim.api.nvim_create_autocmd("VimLeavePre", {
         callback = function()
             local request_count = requests.cancel_all_requests()
-            local server_count = server.stop_all_servers()
+            -- Use force=true for immediate cleanup since Vim is exiting
+            local server_count = server.stop_all_servers(true)
             if request_count > 0 or server_count > 0 then
                 -- Brief message - Vim is exiting anyway
                 local parts = {}

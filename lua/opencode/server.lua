@@ -12,7 +12,7 @@ local config = require("opencode.config")
 -- =============================================================================
 
 --- Get server info for current cwd
----@return table|nil server { process, port, url } or nil
+---@return table|nil server { process, port, url, agent, model, session_id } or nil
 function M.get_server_for_cwd()
     local cwd = config.get_cwd()
     local server = config.state.servers[cwd]
@@ -27,6 +27,99 @@ function M.get_server_for_cwd()
         return server
     end
     return nil
+end
+
+--- Get the current agent for the server
+---@return string agent Current agent name ("build" or "plan")
+function M.get_server_agent()
+    local server = M.get_server_for_cwd()
+    if server and server.agent then
+        return server.agent
+    end
+    return "build" -- Default agent
+end
+
+--- Set the agent for the current server
+---@param agent string Agent name ("build" or "plan")
+function M.set_server_agent(agent)
+    local cwd = config.get_cwd()
+    local server = config.state.servers[cwd]
+    if server then
+        server.agent = agent
+    end
+end
+
+--- Get the current model for the server
+---@return string|nil model Current model (provider/model format) or nil for default
+function M.get_server_model()
+    local server = M.get_server_for_cwd()
+    if server and server.model then
+        return server.model
+    end
+    return nil
+end
+
+--- Set the model for the current server
+---@param model string|nil Model in provider/model format (nil for default)
+function M.set_server_model(model)
+    local cwd = config.get_cwd()
+    local server = config.state.servers[cwd]
+    if server then
+        server.model = model
+    end
+end
+
+--- Get the current session ID for the server
+---@return string|nil session_id Current session ID or nil
+function M.get_server_session()
+    local server = M.get_server_for_cwd()
+    if server and server.session_id then
+        return server.session_id
+    end
+    return nil
+end
+
+--- Set the session ID for the current server
+---@param session_id string|nil Session ID (nil to clear)
+function M.set_server_session(session_id)
+    local cwd = config.get_cwd()
+    local server = config.state.servers[cwd]
+    if server then
+        server.session_id = session_id
+    end
+end
+
+--- Update all server settings at once
+---@param opts table { agent?, model?, session_id? }
+function M.update_server_settings(opts)
+    local cwd = config.get_cwd()
+    local server = config.state.servers[cwd]
+    if server then
+        if opts.agent ~= nil then
+            server.agent = opts.agent
+        end
+        if opts.model ~= nil then
+            server.model = opts.model
+        end
+        if opts.session_id ~= nil then
+            server.session_id = opts.session_id
+        end
+    end
+end
+
+--- Sync current global state to the server
+--- Call this when model, agent, or session changes in the global state
+function M.sync_state_to_server()
+    local server = M.get_server_for_cwd()
+    if not server then
+        return
+    end
+
+    -- Sync model from global config state
+    server.model = config.state.selected_model
+
+    -- Sync current session
+    server.session_id = config.state.current_session_id
 end
 
 --- Stop server for current cwd
@@ -51,15 +144,43 @@ function M.stop_server_for_cwd()
 end
 
 --- Stop all servers (for cleanup)
+---@param force? boolean If true, use SIGKILL immediately (default: false, use SIGTERM first)
 ---@return number count Number of servers stopped
-function M.stop_all_servers()
+function M.stop_all_servers(force)
     local count = 0
-    for cwd, server in pairs(config.state.servers) do
-        if server.process then
-            pcall(function() server.process:kill(9) end)
+    local servers_to_stop = {}
+
+    -- Collect all servers with processes
+    for cwd, srv in pairs(config.state.servers) do
+        if srv.process then
+            table.insert(servers_to_stop, { cwd = cwd, process = srv.process })
             count = count + 1
         end
     end
+
+    if count == 0 then
+        return 0
+    end
+
+    if force then
+        -- Immediate kill
+        for _, srv in ipairs(servers_to_stop) do
+            pcall(function() srv.process:kill(9) end) -- SIGKILL
+        end
+    else
+        -- Graceful shutdown: SIGTERM first
+        for _, srv in ipairs(servers_to_stop) do
+            pcall(function() srv.process:kill(15) end) -- SIGTERM
+        end
+        -- Schedule force kill after a short delay if still running
+        vim.defer_fn(function()
+            for _, srv in ipairs(servers_to_stop) do
+                -- Check if process is still running and force kill
+                pcall(function() srv.process:kill(9) end) -- SIGKILL
+            end
+        end, 1000)
+    end
+
     config.state.servers = {}
     return count
 end
@@ -126,6 +247,9 @@ function M.start_server_for_cwd(callback)
                             port = captured_port,
                             url = url,
                             starting = false,
+                            agent = "build", -- Default agent
+                            model = config.state.selected_model, -- Sync model from global state
+                            session_id = config.state.current_session_id, -- Sync session from global state
                         }
                         callback(true, url)
                     end)
@@ -148,6 +272,9 @@ function M.start_server_for_cwd(callback)
                             port = captured_port,
                             url = url,
                             starting = false,
+                            agent = "build", -- Default agent
+                            model = config.state.selected_model, -- Sync model from global state
+                            session_id = config.state.current_session_id, -- Sync session from global state
                         }
                         callback(true, url)
                     end)
