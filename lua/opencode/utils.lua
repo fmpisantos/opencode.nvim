@@ -227,16 +227,14 @@ end
 -- =============================================================================
 
 --- Build opencode command with common options
----@param base_args table Base command arguments
+--- NOTE: Callers are responsible for adding --model flag before calling this function.
+--- This function does NOT add --model to avoid duplication with caller-specific model handling.
+---@param base_args table Base command arguments (should include --model if needed)
 ---@param prompt? string Optional prompt to append
 ---@param files? table Optional array of file paths to attach via --file
 ---@return table cmd Complete command
 function M.build_opencode_cmd(base_args, prompt, files)
     local cmd = vim.deepcopy(base_args)
-    if config.state.selected_model and config.state.selected_model ~= "" then
-        table.insert(cmd, "--model")
-        table.insert(cmd, config.state.selected_model)
-    end
     -- Add files with --file flag
     if files and #files > 0 then
         for _, file in ipairs(files) do

@@ -652,6 +652,11 @@ function M.run_opencode_command(command, args)
 
     -- Build command
     local base_cmd = { "opencode", "run", "--agent", "build", "--format", "json", "--command", command }
+    -- Add --model flag if a model is selected
+    if state.selected_model and state.selected_model ~= "" then
+        table.insert(base_cmd, "--model")
+        table.insert(base_cmd, state.selected_model)
+    end
     local cmd = utils.build_opencode_cmd(base_cmd, (args and args ~= "") and args or nil, files)
 
     -- Build header
