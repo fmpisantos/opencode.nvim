@@ -594,9 +594,13 @@ function M.run_opencode(prompt, files, source_file)
                 end)
             end
 
+            -- Use the server's cwd to ensure we're running in the same project context
+            -- This is important for --attach to work correctly
+            local run_cwd = server.get_server_cwd() or config.get_cwd()
+
             -- Use streaming stdout handler (same as quick mode)
             system_obj = vim.system(cmd, {
-                cwd = config.get_cwd(),
+                cwd = run_cwd,
                 stdout = function(_, data)
                     if data then
                         vim.schedule(function()

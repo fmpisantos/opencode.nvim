@@ -87,6 +87,16 @@ function M.get_server_session()
     return nil
 end
 
+--- Get the server's working directory
+---@return string|nil cwd The server's working directory or nil
+function M.get_server_cwd()
+    local server = M.get_server_for_cwd()
+    if server and server.cwd then
+        return server.cwd
+    end
+    return nil
+end
+
 --- Set the session ID for the current server
 ---@param session_id string|nil Session ID (nil to clear)
 function M.set_server_session(session_id)
@@ -254,6 +264,7 @@ function M.start_server_for_cwd(callback)
                             process = process,
                             port = captured_port,
                             url = url,
+                            cwd = cwd, -- Store cwd for consistency when running commands
                             starting = false,
                             agent = "build", -- Default agent
                             model = config.state.selected_model, -- Sync model from global state
@@ -279,6 +290,7 @@ function M.start_server_for_cwd(callback)
                             process = process,
                             port = captured_port,
                             url = url,
+                            cwd = cwd, -- Store cwd for consistency when running commands
                             starting = false,
                             agent = "build", -- Default agent
                             model = config.state.selected_model, -- Sync model from global state
