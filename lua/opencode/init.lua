@@ -377,8 +377,29 @@ local function parse_lines(str)
     return lines
 end
 
+--- Check if a file path exists (handles both absolute and relative paths)
+---@param filepath string The file path to check
+---@return boolean exists Whether the file exists and is readable
+local function file_exists(filepath)
+    -- First try the path as-is (handles absolute paths and paths relative to cwd)
+    if vim.fn.filereadable(filepath) == 1 then
+        return true
+    end
+
+    -- If it's a relative path, also try resolving it from cwd explicitly
+    if not filepath:match("^[/~]") then
+        local full_path = get_cwd() .. "/" .. filepath
+        if vim.fn.filereadable(full_path) == 1 then
+            return true
+        end
+    end
+
+    return false
+end
+
 --- Extract file references from prompt content
 --- Looks for patterns like @path/to/file or `@path/to/file`
+--- Only returns files that actually exist; non-existent paths are treated as plain text
 ---@param content string The prompt content
 ---@return table files Array of unique file paths that exist
 local function extract_file_references(content)
@@ -388,7 +409,7 @@ local function extract_file_references(content)
     -- Match patterns like @path/to/file or `@path/to/file`
     -- The pattern matches @ followed by a path (no spaces, backticks, or newlines)
     for file in content:gmatch("`@([^`%s\n]+)`") do
-        if not seen[file] and vim.fn.filereadable(file) == 1 then
+        if not seen[file] and file_exists(file) then
             table.insert(files, file)
             seen[file] = true
         end
@@ -397,7 +418,7 @@ local function extract_file_references(content)
     -- Also match bare @file references (not wrapped in backticks)
     for file in content:gmatch("@([^%s`\n]+)") do
         -- Skip if it looks like an email or already captured
-        if not file:match("@") and not seen[file] and vim.fn.filereadable(file) == 1 then
+        if not file:match("@") and not seen[file] and file_exists(file) then
             table.insert(files, file)
             seen[file] = true
         end
