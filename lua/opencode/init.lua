@@ -34,6 +34,9 @@ local default_config = {
         enable_default = true,
         open_prompt = "<leader>oc",
     },
+    -- MD files to auto-discover up the directory tree (like AGENT.md)
+    -- These files provide hierarchical context to the AI
+    md_files = { "AGENT.md", "AGENTS.md" },
 }
 
 -- =============================================================================
@@ -54,6 +57,10 @@ local current_session_id = nil
 local current_session_name = nil
 local response_buf = nil
 local response_win = nil
+
+-- Active requests tracking (for cancellation)
+local active_requests = {} -- table of { id = { system_obj, cleanup_fn } }
+local next_request_id = 0
 
 -- =============================================================================
 -- Config Management
@@ -333,12 +340,20 @@ end
 --- Build opencode command with common options
 ---@param base_args table Base command arguments
 ---@param prompt? string Optional prompt to append
+---@param files? table Optional array of file paths to attach via --file
 ---@return table cmd Complete command
-local function build_opencode_cmd(base_args, prompt)
+local function build_opencode_cmd(base_args, prompt, files)
     local cmd = vim.deepcopy(base_args)
     if selected_model and selected_model ~= "" then
         table.insert(cmd, "--model")
         table.insert(cmd, selected_model)
+    end
+    -- Add files with --file flag
+    if files and #files > 0 then
+        for _, file in ipairs(files) do
+            table.insert(cmd, "--file")
+            table.insert(cmd, file)
+        end
     end
     if prompt then
         table.insert(cmd, prompt)
@@ -357,6 +372,150 @@ local function parse_lines(str)
         end
     end
     return lines
+end
+
+--- Extract file references from prompt content
+--- Looks for patterns like @path/to/file or `@path/to/file`
+---@param content string The prompt content
+---@return table files Array of unique file paths that exist
+local function extract_file_references(content)
+    local files = {}
+    local seen = {}
+
+    -- Match patterns like @path/to/file or `@path/to/file`
+    -- The pattern matches @ followed by a path (no spaces, backticks, or newlines)
+    for file in content:gmatch("`@([^`%s\n]+)`") do
+        if not seen[file] and vim.fn.filereadable(file) == 1 then
+            table.insert(files, file)
+            seen[file] = true
+        end
+    end
+
+    -- Also match bare @file references (not wrapped in backticks)
+    for file in content:gmatch("@([^%s`\n]+)") do
+        -- Skip if it looks like an email or already captured
+        if not file:match("@") and not seen[file] and vim.fn.filereadable(file) == 1 then
+            table.insert(files, file)
+            seen[file] = true
+        end
+    end
+
+    return files
+end
+
+--- Discover MD files (like AGENT.md) by walking up the directory tree
+--- from the source file to the project root (cwd)
+---@param source_file? string The source file path (relative to cwd)
+---@return table files Array of MD file paths found (from deepest to root)
+local function discover_md_files(source_file)
+    local md_files = {}
+    local cwd = get_cwd()
+
+    -- Determine starting directory
+    local start_dir
+    if source_file and source_file ~= "" then
+        -- Get the directory containing the source file
+        local full_path = cwd .. "/" .. source_file
+        start_dir = vim.fn.fnamemodify(full_path, ":h")
+    else
+        -- Use cwd if no source file
+        start_dir = cwd
+    end
+
+    -- Normalize cwd (ensure no trailing slash for comparison)
+    cwd = cwd:gsub("/$", "")
+
+    -- Walk up the directory tree from start_dir to cwd
+    local dir = start_dir
+    local seen = {}
+
+    while dir and dir:find(cwd, 1, true) == 1 do
+        for _, md_file_name in ipairs(user_config.md_files or {}) do
+            local md_path = dir .. "/" .. md_file_name
+            if not seen[md_path] and vim.fn.filereadable(md_path) == 1 then
+                -- Convert to relative path for --file flag
+                local relative_path = md_path
+                if md_path:sub(1, #cwd + 1) == cwd .. "/" then
+                    relative_path = md_path:sub(#cwd + 2)
+                end
+                table.insert(md_files, relative_path)
+                seen[md_path] = true
+            end
+        end
+
+        -- Stop if we've reached cwd
+        if dir == cwd then
+            break
+        end
+
+        -- Move up one directory
+        local parent = vim.fn.fnamemodify(dir, ":h")
+        if parent == dir then
+            -- We've reached the filesystem root
+            break
+        end
+        dir = parent
+    end
+
+    return md_files
+end
+
+-- =============================================================================
+-- Active Request Management
+-- =============================================================================
+
+--- Register an active request for tracking/cancellation
+---@param system_obj table The vim.system object
+---@param cleanup_fn? function Optional cleanup function to call on cancel
+---@return number request_id The ID of the registered request
+local function register_request(system_obj, cleanup_fn)
+    next_request_id = next_request_id + 1
+    active_requests[next_request_id] = {
+        system_obj = system_obj,
+        cleanup_fn = cleanup_fn,
+    }
+    return next_request_id
+end
+
+--- Unregister a completed request
+---@param request_id number The request ID to unregister
+local function unregister_request(request_id)
+    active_requests[request_id] = nil
+end
+
+--- Cancel a specific request
+---@param request_id number The request ID to cancel
+local function cancel_request(request_id)
+    local request = active_requests[request_id]
+    if request then
+        if request.system_obj then
+            pcall(function() request.system_obj:kill(9) end)
+        end
+        if request.cleanup_fn then
+            pcall(request.cleanup_fn)
+        end
+        active_requests[request_id] = nil
+    end
+end
+
+--- Cancel all active requests
+local function cancel_all_requests()
+    local count = 0
+    for id, _ in pairs(active_requests) do
+        cancel_request(id)
+        count = count + 1
+    end
+    return count
+end
+
+--- Get count of active requests
+---@return number
+local function get_active_request_count()
+    local count = 0
+    for _ in pairs(active_requests) do
+        count = count + 1
+    end
+    return count
 end
 
 -- =============================================================================
@@ -596,7 +755,9 @@ end
 
 --- Run opencode with session support
 ---@param prompt string The prompt to send
-local function run_opencode(prompt)
+---@param files? table Optional array of file paths to attach via --file
+---@param source_file? string Optional source file for MD file discovery
+local function run_opencode(prompt, files, source_file)
     if not prompt or prompt == "" then
         return
     end
@@ -638,13 +799,41 @@ local function run_opencode(prompt)
     -- Update buffer's session id (may be nil for new sessions until we get it from CLI)
     vim.b[buf].opencode_session_id = current_session_id
 
+    -- Collect all files to attach:
+    -- 1. Files explicitly passed in (e.g., source buffer)
+    -- 2. Files referenced with @path in the prompt
+    -- 3. MD files discovered up the directory tree (AGENT.md, etc.)
+    local all_files = files and vim.deepcopy(files) or {}
+    local seen_files = {}
+    for _, f in ipairs(all_files) do
+        seen_files[f] = true
+    end
+
+    -- Add files referenced in prompt
+    local prompt_files = extract_file_references(prompt)
+    for _, f in ipairs(prompt_files) do
+        if not seen_files[f] then
+            table.insert(all_files, f)
+            seen_files[f] = true
+        end
+    end
+
+    -- Discover and add MD files (AGENT.md, etc.) from directory hierarchy
+    local md_files = discover_md_files(source_file)
+    for _, f in ipairs(md_files) do
+        if not seen_files[f] then
+            table.insert(all_files, f)
+            seen_files[f] = true
+        end
+    end
+
     -- Build command with --session flag if continuing
     local base_cmd = { "opencode", "run", "--agent", agent, "--format", "json" }
     if cli_session_id then
         table.insert(base_cmd, "--session")
         table.insert(base_cmd, cli_session_id)
     end
-    local cmd = build_opencode_cmd(base_cmd, prompt)
+    local cmd = build_opencode_cmd(base_cmd, prompt, all_files)
 
     -- Build header for this query
     local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
@@ -675,6 +864,7 @@ local function run_opencode(prompt)
     local run_start_time = nil
     local spinner_idx = 1
     local update_timer = nil
+    local request_id = nil
 
     -- Function to update display with current streaming state
     local function update_display()
@@ -826,6 +1016,11 @@ local function run_opencode(prompt)
                     update_timer = nil
                 end
 
+                -- Unregister the request
+                if request_id then
+                    unregister_request(request_id)
+                end
+
                 -- Final update
                 local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
                 local display_lines = vim.deepcopy(full_header)
@@ -863,6 +1058,16 @@ local function run_opencode(prompt)
             end)
         end)
 
+        -- Register request for cancellation tracking
+        local cleanup_fn = function()
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
+        end
+        request_id = register_request(system_obj, cleanup_fn)
+
         -- Set up autocmd to kill process if buffer is deleted
         vim.api.nvim_create_autocmd("BufDelete", {
             buffer = buf,
@@ -873,6 +1078,9 @@ local function run_opencode(prompt)
                 end
                 if update_timer then
                     vim.fn.timer_stop(update_timer)
+                end
+                if request_id then
+                    unregister_request(request_id)
                 end
             end,
         })
@@ -895,9 +1103,15 @@ local function run_opencode_command(command, args)
 
     local buf, _ = create_response_split("OpenCode Response", true)
 
+    -- Extract file references from args if present
+    local files = {}
+    if args and args ~= "" then
+        files = extract_file_references(args)
+    end
+
     -- Build command
     local base_cmd = { "opencode", "run", "--agent", "build", "--format", "json", "--command", command }
-    local cmd = build_opencode_cmd(base_cmd, (args and args ~= "") and args or nil)
+    local cmd = build_opencode_cmd(base_cmd, (args and args ~= "") and args or nil, files)
 
     -- Build header
     local model_info = selected_model and (" [" .. get_model_display() .. "]") or ""
@@ -920,6 +1134,7 @@ local function run_opencode_command(command, args)
     local run_start_time = vim.loop.now()
     local spinner_idx = 1
     local update_timer = nil
+    local request_id = nil
 
     -- Function to update display with current streaming state
     local function update_display()
@@ -1063,6 +1278,11 @@ local function run_opencode_command(command, args)
                 update_timer = nil
             end
 
+            -- Unregister the request
+            if request_id then
+                unregister_request(request_id)
+            end
+
             -- Final update
             local response_lines, err, _, _, _, final_cli_session_id = parse_streaming_response(json_lines)
             local display_lines = vim.deepcopy(header_lines)
@@ -1100,6 +1320,16 @@ local function run_opencode_command(command, args)
         end)
     end)
 
+    -- Register request for cancellation tracking
+    local cleanup_fn = function()
+        is_running = false
+        if update_timer then
+            vim.fn.timer_stop(update_timer)
+            update_timer = nil
+        end
+    end
+    request_id = register_request(system_obj, cleanup_fn)
+
     -- Set up autocmd to kill process if buffer is deleted
     vim.api.nvim_create_autocmd("BufDelete", {
         buffer = buf,
@@ -1110,6 +1340,9 @@ local function run_opencode_command(command, args)
             end
             if update_timer then
                 vim.fn.timer_stop(update_timer)
+            end
+            if request_id then
+                unregister_request(request_id)
             end
         end,
     })
@@ -1303,8 +1536,16 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
         local content = table.concat(lines, "\n")
 
+        -- Collect files to attach via --file flag
+        local files_to_attach = {}
+
+        -- If source_file is referenced via #buffer or #buf, add it to files
         if source_file and source_file ~= "" then
-            content = content:gsub("#buffer", "`@" .. source_file .. "`"):gsub("#buf", "`@" .. source_file .. "`")
+            if content:match("#buffer") or content:match("#buf") then
+                table.insert(files_to_attach, source_file)
+            end
+            -- Replace #buffer/#buf with @filepath reference in the prompt text
+            content = content:gsub("#buffer", "@" .. source_file):gsub("#buf", "@" .. source_file)
         end
 
         -- Remove bare #session triggers (but keep #session(<id>))
@@ -1315,7 +1556,7 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         vim.api.nvim_win_close(win, true)
 
         if content and vim.trim(content) ~= "" then
-            run_opencode(content)
+            run_opencode(content, files_to_attach, source_file)
         end
     end
 
@@ -1557,6 +1798,22 @@ M.Init = function()
     run_opencode_command("init", nil)
 end
 
+--- Stop all active requests
+M.StopAll = function()
+    local count = cancel_all_requests()
+    if count > 0 then
+        vim.notify("Stopped " .. count .. " active request(s)", vim.log.levels.INFO)
+    else
+        vim.notify("No active requests to stop", vim.log.levels.INFO)
+    end
+end
+
+--- Get the number of active requests
+---@return number
+M.GetActiveRequestCount = function()
+    return get_active_request_count()
+end
+
 -- =============================================================================
 -- Commands & Keymaps
 -- =============================================================================
@@ -1625,6 +1882,14 @@ local function setup_commands()
     vim.api.nvim_create_user_command("OCInit", function()
         M.Init()
     end, { nargs = 0 })
+
+    -- Stop all active requests
+    vim.api.nvim_create_user_command("OpenCodeStop", function()
+        M.StopAll()
+    end, { nargs = 0 })
+    vim.api.nvim_create_user_command("OCStop", function()
+        M.StopAll()
+    end, { nargs = 0 })
 end
 
 local function setup_keymaps()
@@ -1687,6 +1952,17 @@ function M.setup(opts)
     setup_commands()
     setup_keymaps()
     setup_auto_reload()
+
+    -- Clean up active requests when Vim exits
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+        callback = function()
+            local count = cancel_all_requests()
+            if count > 0 then
+                -- Brief message - Vim is exiting anyway
+                print("OpenCode: Stopped " .. count .. " active request(s)")
+            end
+        end,
+    })
 
     is_initialized = true
 end
