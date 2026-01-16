@@ -217,6 +217,9 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
                     state.draft_content = new_lines
                     state.draft_cursor = cursor_pos
 
+                    -- Mark buffer as not modified to prevent "No write since last change" warning
+                    vim.bo[buf].modified = false
+
                     -- Close prompt window and open session picker
                     vim.api.nvim_win_close(state.prompt_win, false)
                     state.prompt_win = nil
@@ -272,6 +275,9 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         state.draft_content = nil
         state.draft_cursor = nil
 
+        -- Mark buffer as not modified to prevent "No write since last change" warning
+        vim.bo[buf].modified = false
+
         -- Close any window displaying this buffer
         local wins = vim.fn.win_findbuf(buf)
         for _, w in ipairs(wins) do
@@ -308,6 +314,9 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             state.draft_content = nil
             state.draft_cursor = nil
         end
+
+        -- Mark buffer as not modified to prevent "No write since last change" warning
+        vim.bo[buf].modified = false
 
         -- Close any window displaying this buffer
         local wins = vim.fn.win_findbuf(buf)
