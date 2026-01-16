@@ -1697,7 +1697,15 @@ end
 
 local function get_window_title(content, show_session)
     local agent_mode = (content and content:match("#plan")) and "plan" or "build"
+    -- Check for #agentic or #quick in content to show pending mode change
     local project_mode = get_project_mode()
+    if content then
+        if content:match("#agentic") then
+            project_mode = "agentic"
+        elseif content:match("#quick") then
+            project_mode = "quick"
+        end
+    end
     local title = " OpenCode [" .. agent_mode .. "] [" .. project_mode .. "] [" .. get_model_display() .. "]"
     if show_session and current_session_id then
         title = title .. " [" .. get_session_display() .. "]"
@@ -1982,6 +1990,17 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
         -- Remove bare #session triggers (but keep #session(<id>))
         content = content:gsub("#session%s*$", ""):gsub("#session([%s\n])", "%1")
+
+        -- Handle #agentic and #quick mode switches
+        if content:match("#agentic") then
+            set_project_mode("agentic")
+            content = content:gsub("#agentic%s*", ""):gsub("%s*#agentic", "")
+            vim.notify("Switched to agentic mode", vim.log.levels.INFO)
+        elseif content:match("#quick") then
+            set_project_mode("quick")
+            content = content:gsub("#quick%s*", ""):gsub("%s*#quick", "")
+            vim.notify("Switched to quick mode", vim.log.levels.INFO)
+        end
 
         draft_content = nil
         draft_cursor = nil
