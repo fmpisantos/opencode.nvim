@@ -1520,7 +1520,10 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         vim.bo[buf].buftype = "acwrite"
         vim.bo[buf].bufhidden = "hide" -- Changed from "wipe" to allow buffer reuse
         vim.bo[buf].filetype = "opencode"
-        vim.api.nvim_buf_set_name(buf, "OpenCode Prompt")
+        vim.bo[buf].swapfile = false -- Prevent swap file creation
+        vim.bo[buf].buflisted = false -- Don't show in buffer list
+        -- Use URI scheme to prevent Neovim from treating this as a file path
+        vim.api.nvim_buf_set_name(buf, "opencode://prompt")
     end
 
     -- Track prompt buffer and window in module state
@@ -1570,11 +1573,17 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
     vim.cmd("startinsert")
 
+    -- Clear existing autocmds for this buffer to prevent duplicates
+    local augroup_name = "OpenCodePrompt_" .. buf
+    vim.api.nvim_create_augroup(augroup_name, { clear = true })
+
     -- Update title on content change and handle #session trigger
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+        group = augroup_name,
         buffer = buf,
         callback = function()
-            if not vim.api.nvim_win_is_valid(win) then
+            -- Use prompt_win instead of captured win to get current window
+            if not prompt_win or not vim.api.nvim_win_is_valid(prompt_win) then
                 return
             end
 
@@ -1594,12 +1603,12 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
 
                     -- Save current draft
-                    local cursor_pos = vim.api.nvim_win_get_cursor(win)
+                    local cursor_pos = vim.api.nvim_win_get_cursor(prompt_win)
                     draft_content = new_lines
                     draft_cursor = cursor_pos
 
                     -- Close prompt window and open session picker
-                    vim.api.nvim_win_close(win, false)
+                    vim.api.nvim_win_close(prompt_win, false)
                     prompt_win = nil
                     select_session_for_prompt(source_file)
                     return
@@ -1607,11 +1616,15 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
             end
 
             -- Update title - show session info if content has #session(<id>)
-            local has_session = has_session_reference(content)
-            vim.api.nvim_win_set_config(win, {
-                title = get_window_title(content, has_session),
-                title_pos = "center",
-            })
+            -- Only update if it's a floating window (has relative set)
+            local win_config = vim.api.nvim_win_get_config(prompt_win)
+            if win_config.relative and win_config.relative ~= "" then
+                local has_session = has_session_reference(content)
+                vim.api.nvim_win_set_config(prompt_win, {
+                    title = get_window_title(content, has_session),
+                    title_pos = "center",
+                })
+            end
         end,
     })
 
@@ -1637,9 +1650,12 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         draft_content = nil
         draft_cursor = nil
 
-        -- Close the window but keep the buffer
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, false)
+        -- Close any window displaying this buffer
+        local wins = vim.fn.win_findbuf(buf)
+        for _, w in ipairs(wins) do
+            if vim.api.nvim_win_is_valid(w) then
+                vim.api.nvim_win_close(w, false)
+            end
         end
         prompt_win = nil
 
@@ -1661,23 +1677,36 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
 
         if has_content then
             draft_content = lines
-            draft_cursor = vim.api.nvim_win_get_cursor(win)
+            -- Get cursor from current window if it's displaying our buffer
+            local current_win = vim.api.nvim_get_current_win()
+            if vim.api.nvim_win_get_buf(current_win) == buf then
+                draft_cursor = vim.api.nvim_win_get_cursor(current_win)
+            end
         else
             draft_content = nil
             draft_cursor = nil
         end
 
-        -- Close the window but keep the buffer
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, false)
+        -- Close any window displaying this buffer
+        local wins = vim.fn.win_findbuf(buf)
+        for _, w in ipairs(wins) do
+            if vim.api.nvim_win_is_valid(w) then
+                vim.api.nvim_win_close(w, false)
+            end
         end
         prompt_win = nil
     end
 
     local function attach_to_window()
-        -- Close the floating window
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, false)
+        -- Close any floating windows displaying this buffer
+        local wins = vim.fn.win_findbuf(buf)
+        for _, w in ipairs(wins) do
+            if vim.api.nvim_win_is_valid(w) then
+                local win_config = vim.api.nvim_win_get_config(w)
+                if win_config.relative and win_config.relative ~= "" then
+                    vim.api.nvim_win_close(w, false)
+                end
+            end
         end
         prompt_win = nil
 
@@ -1692,8 +1721,9 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         vim.notify("Prompt attached to window. Use :OpenCode to return to floating mode.", vim.log.levels.INFO)
     end
 
-    -- Keymaps
+    -- Keymaps and autocmds (add BufWriteCmd to the group)
     vim.api.nvim_create_autocmd("BufWriteCmd", {
+        group = augroup_name,
         buffer = buf,
         callback = submit_prompt,
     })
