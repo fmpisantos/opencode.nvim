@@ -47,13 +47,30 @@ local function insert_file_reference()
                     return
                 end
 
-                -- Insert the file path at cursor position with trailing space
+                -- Insert the file path at cursor position with backticks and trailing space
+                -- The @ character was already inserted, so we need to position correctly
                 vim.api.nvim_set_current_win(target_win)
                 local row, col = unpack(vim.api.nvim_win_get_cursor(target_win))
                 local line = vim.api.nvim_buf_get_lines(target_buf, row - 1, row, false)[1]
-                local new_line = line:sub(1, col) .. filepath .. " " .. line:sub(col + 1)
-                vim.api.nvim_buf_set_lines(target_buf, row - 1, row, false, { new_line })
-                vim.api.nvim_win_set_cursor(target_win, { row, col + #filepath + 1 })
+                -- Check if there's an @ before cursor that we should include in the backticks
+                local before_cursor = line:sub(1, col)
+                local after_cursor = line:sub(col + 1)
+                local wrapped_path
+                local new_line
+                if before_cursor:match("@$") then
+                    -- Replace the @ with backtick-wrapped @filepath
+                    local before_at = before_cursor:sub(1, -2)
+                    wrapped_path = "`@" .. filepath .. "`"
+                    new_line = before_at .. wrapped_path .. " " .. after_cursor
+                    vim.api.nvim_buf_set_lines(target_buf, row - 1, row, false, { new_line })
+                    vim.api.nvim_win_set_cursor(target_win, { row, #before_at + #wrapped_path + 1 })
+                else
+                    -- No @ before cursor, just insert backtick-wrapped filepath
+                    wrapped_path = "`" .. filepath .. "`"
+                    new_line = before_cursor .. wrapped_path .. " " .. after_cursor
+                    vim.api.nvim_buf_set_lines(target_buf, row - 1, row, false, { new_line })
+                    vim.api.nvim_win_set_cursor(target_win, { row, col + #wrapped_path + 1 })
+                end
 
                 vim.schedule(function()
                     vim.cmd("startinsert!")
@@ -80,10 +97,10 @@ local function try_replace_buffer_shortcut()
     local pattern, replacement
     if before_cursor:match("#buffer$") then
         pattern = "#buffer$"
-        replacement = "@" .. source_file
+        replacement = "`@" .. source_file .. "`"
     elseif before_cursor:match("#buf$") then
         pattern = "#buf$"
-        replacement = "@" .. source_file
+        replacement = "`@" .. source_file .. "`"
     else
         return false
     end
@@ -101,7 +118,7 @@ end
 
 -- @ trigger: Insert file reference with fuzzy finder
 vim.keymap.set("i", "@", function()
-    -- Insert @ character first
+    -- Insert @ character first (will be replaced when file is selected)
     vim.api.nvim_feedkeys("@", "n", false)
     -- Then trigger the file finder asynchronously
     vim.schedule(function()
