@@ -1304,7 +1304,7 @@ M.OpenCode = function(initial_prompt, filetype, source_file, session_id_to_conti
         local content = table.concat(lines, "\n")
 
         if source_file and source_file ~= "" then
-            content = content:gsub("#buffer", "@" .. source_file):gsub("#buf", "@" .. source_file)
+            content = content:gsub("#buffer", "`@" .. source_file .. "`"):gsub("#buf", "`@" .. source_file .. "`")
         end
 
         -- Remove bare #session triggers (but keep #session(<id>))
