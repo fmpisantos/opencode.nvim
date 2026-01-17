@@ -689,14 +689,20 @@ function M.GetAgent()
 end
 
 --- Set the agent for the current server
+--- Uses HTTP API to change the default_agent on the server when running
 ---@param agent string "build" or "plan"
 function M.SetAgent(agent)
     if agent ~= "build" and agent ~= "plan" then
         vim.notify("Invalid agent: " .. tostring(agent) .. ". Use 'build' or 'plan'.", vim.log.levels.ERROR)
         return
     end
-    server.set_server_agent(agent)
-    vim.notify("OpenCode agent set to: " .. agent, vim.log.levels.INFO)
+    server.set_server_agent(agent, function(success, err)
+        if success then
+            vim.notify("OpenCode agent set to: " .. agent, vim.log.levels.INFO)
+        else
+            vim.notify("OpenCode agent set locally to: " .. agent .. " (server update failed: " .. tostring(err) .. ")", vim.log.levels.WARN)
+        end
+    end)
 end
 
 --- Get server status for current project

@@ -67,9 +67,13 @@ function M.run_opencode(prompt, files, source_file)
         prompt = prompt:gsub("#build%s*", ""):gsub("%s*#build", "")
     end
 
-    -- Update server agent if it changed (for agentic mode)
+    -- Update local server state if agent changed (HTTP API call happens before execution)
     if mode == "agentic" and agent_changed_by_prompt then
-        server.set_server_agent(agent)
+        local cwd = config.get_cwd()
+        local srv = config.state.servers[cwd]
+        if srv then
+            srv.agent = agent
+        end
     end
 
     -- Set current session if continuing
@@ -407,6 +411,7 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Function to execute via CLI with --attach flag (agentic mode)
     -- Uses `opencode run --attach <url>` as per https://opencode.ai/docs/cli/#attach
+    -- Note: Agent is set via HTTP API (PATCH /config) instead of --agent flag
     ---@param server_url string Server URL to attach to
     local function execute_agentic(server_url)
         -- Get model to use
@@ -424,7 +429,8 @@ function M.run_opencode(prompt, files, source_file)
 
         -- Build command using --attach flag
         -- From docs: opencode run --attach http://localhost:4096 "message"
-        local base_cmd = { "opencode", "run", "--attach", server_url, "--agent", agent, "--format", "json" }
+        -- Note: --agent is NOT used here; agent is set via HTTP API (PATCH /config)
+        local base_cmd = { "opencode", "run", "--attach", server_url, "--format", "json" }
 
         -- Add --model flag if a model is selected
         if model_to_use and model_to_use ~= "" then
@@ -715,11 +721,18 @@ function M.run_opencode(prompt, files, source_file)
             "Starting opencode server... " .. config.SPINNER_FRAMES[1],
         })
 
-        -- Ensure server is running, then execute with --attach
+        -- Ensure server is running, then set agent via HTTP API and execute with --attach
         server.ensure_server_running(function(success, url_or_error)
             vim.schedule(function()
                 if success then
-                    execute_agentic(url_or_error)
+                    -- Set the agent via HTTP API before executing
+                    -- This ensures the server uses the correct agent without --agent flag
+                    server.set_server_agent(agent, function(agent_success, agent_err)
+                        if not agent_success then
+                            vim.notify("Warning: Failed to set agent on server: " .. tostring(agent_err), vim.log.levels.WARN)
+                        end
+                        execute_agentic(url_or_error)
+                    end)
                 else
                     -- Server failed to start
                     if vim.api.nvim_buf_is_valid(buf) then
