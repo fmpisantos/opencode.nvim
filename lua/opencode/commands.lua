@@ -174,9 +174,50 @@ local function setup_commands(opencode)
     vim.api.nvim_create_user_command("OpenCodeServerRestart", function()
         opencode.ServerRestart()
     end, { nargs = 0, desc = "Restart OpenCode server" })
-    vim.api.nvim_create_user_command("OCServerRestart", function()
-        opencode.ServerRestart()
-    end, { nargs = 0, desc = "Restart OpenCode server" })
+    
+    -- Fetch configuration from the OpenCode server
+    vim.api.nvim_create_user_command("OCConfig", function(opts)
+        local port = tonumber(opts.args)
+        if not port then
+            local config = require("opencode.config")
+            port = config.defaults.server.port > 0 and config.defaults.server.port or 8080 -- Fallback port
+        end
+
+        local url = string.format("http://127.0.0.1:%s/config", port)
+        local response = vim.fn.system({"curl", "-s", url})
+
+        if vim.v.shell_error ~= 0 then
+            vim.notify("Failed to fetch config from server. Please ensure the opencode server is running on port " .. port, vim.log.levels.ERROR)
+            return
+        end
+
+        -- Create a new scratch buffer to display the config
+        local buf = vim.api.nvim_create_buf(false, true) -- Create scratch buffer
+        vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+        vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+        vim.api.nvim_buf_set_option(buf, "filetype", "json")
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(response, "\n"))
+
+        -- Open the buffer in a floating window
+        local width = vim.o.columns
+        local height = vim.o.lines
+        local win_width = math.ceil(width * 0.8)
+        local win_height = math.ceil(height * 0.8)
+        local col = math.ceil((width - win_width) / 2)
+        local row = math.ceil((height - win_height) / 2)
+        vim.api.nvim_open_win(buf, true, {
+            relative = "editor",
+            width = win_width,
+            height = win_height,
+            col = col,
+            row = row,
+            border = "rounded",
+            style = "minimal",
+        })
+    end, {
+        nargs = "?",
+        desc = "Fetch and display OpenCode server configuration",
+    })
 
     -- Agent management (build/plan)
     vim.api.nvim_create_user_command("OpenCodeAgent", function(opts)
@@ -230,6 +271,49 @@ end
 function M.setup(opencode, config)
     setup_commands(opencode)
     setup_keymaps(config)
+
+    vim.api.nvim_create_user_command("OCConfig", function(opts)
+        local port = tonumber(opts.args)
+        if not port then
+            local config = require("opencode.config")
+            port = config.defaults.server.port > 0 and config.defaults.server.port or 8080 -- Fallback port
+        end
+
+        local url = string.format("http://127.0.0.1:%s/config", port)
+        local response = vim.fn.system({"curl", "-s", url})
+
+        if vim.v.shell_error ~= 0 then
+            vim.notify("Failed to fetch config from server. Please ensure the opencode server is running on port " .. port, vim.log.levels.ERROR)
+            return
+        end
+
+        -- Create a new scratch buffer to display the config
+        local buf = vim.api.nvim_create_buf(false, true) -- Create scratch buffer
+        vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+        vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+        vim.api.nvim_buf_set_option(buf, "filetype", "json")
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(response, "\n"))
+
+        -- Open the buffer in a floating window
+        local width = vim.o.columns
+        local height = vim.o.lines
+        local win_width = math.ceil(width * 0.8)
+        local win_height = math.ceil(height * 0.8)
+        local col = math.ceil((width - win_width) / 2)
+        local row = math.ceil((height - win_height) / 2)
+        vim.api.nvim_open_win(buf, true, {
+            relative = "editor",
+            width = win_width,
+            height = win_height,
+            col = col,
+            row = row,
+            border = "rounded",
+            style = "minimal",
+        })
+    end, {
+        nargs = "?",
+        desc = "Fetch and display OpenCode server configuration",
+    })
 end
 
 --- Get source file from current buffer (exported for use by other modules)
