@@ -117,6 +117,16 @@ function M.create_response_split(name, clear)
     vim.bo[state.response_buf].bufhidden = "hide"
     vim.bo[state.response_buf].filetype = "markdown"
     vim.api.nvim_buf_set_name(state.response_buf, name)
+    -- Prevent 'No write since last change' for this response buffer
+    local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. state.response_buf, { clear = true })
+    vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
+        group = autocmd_group,
+        buffer = state.response_buf,
+        callback = function()
+            vim.bo[state.response_buf].modified = false
+        end,
+    })
+
 
     -- Apply wrap setting to window
     vim.wo[state.response_win].wrap = state.user_config.response_buffer.wrap
@@ -185,7 +195,15 @@ function M.create_floating_window(opts)
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].filetype = opts.filetype or "opencode"
     vim.api.nvim_buf_set_name(buf, opts.name)
-
+    -- Prevent 'No write since last change' for this floating buffer
+    local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
+    vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
+        group = autocmd_group,
+        buffer = buf,
+        callback = function()
+            vim.bo[buf].modified = false
+        end,
+    })
     return buf, win
 end
 

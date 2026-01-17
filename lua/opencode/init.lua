@@ -134,6 +134,16 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             -- If another buffer still has this name (shouldn't happen), use a unique name
             vim.api.nvim_buf_set_name(buf, "opencode://prompt-" .. buf)
         end
+        -- Prevent 'No write since last change' for this buffer
+        local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
+        vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
+            group = autocmd_group,
+            buffer = buf,
+            callback = function()
+                vim.bo[buf].modified = false
+            end,
+        })
+
     end
 
     -- Track prompt buffer and window in module state
@@ -399,6 +409,16 @@ function M.OpenCodeReview()
     }
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, help_lines)
     vim.api.nvim_win_set_cursor(win, { #help_lines, 0 })
+
+    -- Prevent 'No write since last change' for this review buffer
+    local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
+    vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
+        group = autocmd_group,
+        buffer = buf,
+        callback = function()
+            vim.bo[buf].modified = false
+        end,
+    })
 
     vim.cmd("startinsert")
 
