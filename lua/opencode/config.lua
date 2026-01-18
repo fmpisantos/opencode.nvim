@@ -89,6 +89,7 @@ M.paths = {
 ---@field servers table
 ---@field project_modes table
 
+local shared_state = require("shared_buffer")
 M.state = {
     selected_model = nil,
     draft_content = nil,

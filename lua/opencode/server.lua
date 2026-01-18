@@ -366,6 +366,7 @@ end
 ---@return number count Number of servers stopped
 function M.stop_all_servers(force)
     local count = 0
+    vim.notify('stop_all_servers invoked', vim.log.levels.INFO)
     local servers_to_stop = {}
 
     -- Collect all servers we own (with processes, not external)
@@ -373,6 +374,7 @@ function M.stop_all_servers(force)
         if srv.process and not srv.external then
             table.insert(servers_to_stop, { cwd = cwd, process = srv.process })
             count = count + 1
+        vim.notify(string.format('Stopping server process for cwd: %s', cwd), vim.log.levels.INFO)
         end
     end
 
@@ -395,7 +397,8 @@ function M.stop_all_servers(force)
             vim.defer_fn(function()
                 for _, srv in ipairs(servers_to_stop) do
                     -- Check if process is still running and force kill
-                    pcall(function() srv.process:kill(9) end) -- SIGKILL
+                    local success, err = pcall(function() srv.process:kill(9) end) -- SIGKILL
+                    vim.notify(string.format('Force-killing process: %s | Success: %s | Error: %s', tostring(srv.process.pid), tostring(success), tostring(err)), vim.log.levels.INFO)
                 end
             end, 1000)
         end
