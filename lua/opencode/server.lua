@@ -146,8 +146,14 @@ local function http_request(server_url, method, path, body, callback)
 
     -- Construct a shell-safe command string for debugging
     local debug_cmd = {}
-    for _, part in ipairs(cmd) do
-        table.insert(debug_cmd, vim.fn.shellescape(part))
+    for i, part in ipairs(cmd) do
+        -- Don't quote the curl options like -s, -X, etc. for readability
+        -- But DO quote the URL and the JSON body
+        if part:match("^{.*}$") or part:match("^http") or part:match(" ") then
+            table.insert(debug_cmd, vim.fn.shellescape(part))
+        else
+            table.insert(debug_cmd, part)
+        end
     end
     vim.print("Curl command:", table.concat(debug_cmd, " "))
     vim.system(cmd, { text = true }, function(result)
