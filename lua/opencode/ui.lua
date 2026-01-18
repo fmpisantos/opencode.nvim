@@ -195,15 +195,6 @@ function M.create_floating_window(opts)
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].filetype = opts.filetype or "opencode"
     vim.api.nvim_buf_set_name(buf, opts.name)
-    -- Prevent 'No write since last change' for this floating buffer
-    local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
-    vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
-        group = autocmd_group,
-        buffer = buf,
-        callback = function()
-            vim.bo[buf].modified = false
-        end,
-    })
     return buf, win
 end
 

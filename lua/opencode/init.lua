@@ -134,15 +134,6 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             -- If another buffer still has this name (shouldn't happen), use a unique name
             vim.api.nvim_buf_set_name(buf, "opencode://prompt-" .. buf)
         end
-        -- Prevent 'No write since last change' for this buffer
-        local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
-        vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
-            group = autocmd_group,
-            buffer = buf,
-            callback = function()
-                vim.bo[buf].modified = false
-            end,
-        })
 
     end
 
@@ -409,16 +400,6 @@ function M.OpenCodeReview()
     }
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, help_lines)
     vim.api.nvim_win_set_cursor(win, { #help_lines, 0 })
-
-    -- Prevent 'No write since last change' for this review buffer
-    local autocmd_group = vim.api.nvim_create_augroup("OpenCode_NoSave_" .. buf, { clear = true })
-    vim.api.nvim_create_autocmd({ "BufLeave", "BufWinLeave", "BufUnload", "VimLeavePre" }, {
-        group = autocmd_group,
-        buffer = buf,
-        callback = function()
-            vim.bo[buf].modified = false
-        end,
-    })
 
     vim.cmd("startinsert")
 
@@ -835,22 +816,25 @@ function M.setup(opts)
     commands.setup(M, state.user_config)
     ui.setup_auto_reload()
 
-    -- Clean up active requests, servers, and buffers when Vim exits
-    vim.api.nvim_create_autocmd("VimLeavePre", {
+    -- Clean up opencode buffers before quit to prevent "No write since last change" errors
+    -- QuitPre fires before Neovim checks for unsaved buffers
+    vim.api.nvim_create_autocmd("QuitPre", {
         callback = function()
-            -- Clean up prompt buffer to prevent errors on exit
+            -- Clean up prompt buffer
             if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
-                pcall(function() vim.bo[state.prompt_buf].modified = false end)
-                pcall(vim.api.nvim_buf_delete, state.prompt_buf, { force = true })
-                state.prompt_buf = nil
+                vim.bo[state.prompt_buf].modified = false
             end
             -- Also check by name in case state was lost
             local prompt_buf = vim.fn.bufnr("opencode://prompt")
             if prompt_buf ~= -1 and vim.api.nvim_buf_is_valid(prompt_buf) then
-                pcall(function() vim.bo[prompt_buf].modified = false end)
-                pcall(vim.api.nvim_buf_delete, prompt_buf, { force = true })
+                vim.bo[prompt_buf].modified = false
             end
+        end,
+    })
 
+    -- Clean up active requests and servers when Vim exits
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+        callback = function()
             local request_count = requests.cancel_all_requests()
             -- Use force=true for immediate cleanup since Vim is exiting
             local server_count = server.stop_all_servers(true)
