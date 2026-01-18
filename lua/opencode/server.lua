@@ -131,8 +131,6 @@ local function http_request(server_url, method, path, body, callback)
 
     table.insert(cmd, url)
 
-    vim.print(vim.inspect(cmd))
-
     vim.system(cmd, { text = true }, function(result)
         vim.schedule(function()
             if result.code ~= 0 then
@@ -176,7 +174,9 @@ function M.set_server_agent_via_api(server_url, agent, callback)
                 -- Check if the response contains the updated default_agent
                 if type(result) == "table" and result.default_agent then
                     if result.default_agent ~= agent then
-                        callback(false, "Server did not update default_agent (got: " .. tostring(result.default_agent) .. ", expected: " .. agent .. ")")
+                        callback(false,
+                            "Server did not update default_agent (got: " ..
+                            tostring(result.default_agent) .. ", expected: " .. agent .. ")")
                         return
                     end
                 end
@@ -216,6 +216,7 @@ end
 ---@param callback function Called with (success, error_or_nil)
 function M.send_message_async(server_url, session_id, message, opts, callback)
     opts = opts or {}
+    vim.print(vim.inspect(opts))
     local body = {
         parts = {
             {
@@ -228,7 +229,15 @@ function M.send_message_async(server_url, session_id, message, opts, callback)
         body.agent = opts.agent
     end
     if opts.model then
-        body.model = opts.model
+        local providerID, modelID = string.match(opts.model, "([^/]+)/([^/]+)")
+        if providerID and modelID then
+            body.model = {
+                providerID = providerID,
+                modelID = modelID,
+            }
+        else
+            vim.notify("Invalid model format. Expected 'providerID/modelID'", vim.log.levels.ERROR)
+        end
     end
 
     local path = "/session/" .. session_id .. "/prompt_async"
@@ -907,7 +916,7 @@ function M.start_server_for_cwd(callback)
                     callback_invoked = true
                     config.state.servers[cwd] = nil
                     local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
-                    "Server exited unexpectedly"
+                        "Server exited unexpectedly"
                     callback(false, error_msg)
                 else
                     -- Server stopped (expected or unexpected)
