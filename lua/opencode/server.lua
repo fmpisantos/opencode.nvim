@@ -95,16 +95,16 @@ local function get_registered_server_async(cwd, callback)
         "--connect-timeout", "1",
         entry.url .. "/global/health"
     }, { text = true }, function(result)
-        vim.schedule(function()
-            if result.code == 0 and result.stdout and result.stdout:match("^200") then
-                callback(entry)
-            else
-                -- Server is not responding, clean up the registry entry
-                unregister_server(cwd)
-                callback(nil)
-            end
+            vim.schedule(function()
+                if result.code == 0 and result.stdout and result.stdout:match("^200") then
+                    callback(entry)
+                else
+                    -- Server is not responding, clean up the registry entry
+                    unregister_server(cwd)
+                    callback(nil)
+                end
+            end)
         end)
-    end)
 end
 
 -- =============================================================================
@@ -131,6 +131,7 @@ local function http_request(server_url, method, path, body, callback)
 
     table.insert(cmd, url)
 
+    vim.print("Curl command:", table.concat(cmd, " "))
     vim.system(cmd, { text = true }, function(result)
         vim.schedule(function()
             if result.code ~= 0 then
@@ -216,7 +217,6 @@ end
 ---@param callback function Called with (success, error_or_nil)
 function M.send_message_async(server_url, session_id, message, opts, callback)
     opts = opts or {}
-    vim.print(vim.inspect(opts))
     local body = {
         parts = {
             {
@@ -241,7 +241,7 @@ function M.send_message_async(server_url, session_id, message, opts, callback)
     end
 
     local path = "/session/" .. session_id .. "/prompt_async"
-    http_request(server_url, "POST", path, body, function(success, result)
+    http_request(server_url, "POST", path, body, nil, function(success, result)
         if callback then
             callback(success, success and nil or tostring(result))
         end
@@ -415,17 +415,17 @@ function M.connect_event_stream(server_url, on_event, on_error, on_close)
             end
         end,
     }, function(result)
-        vim.schedule(function()
-            connection.is_connected = false
-            -- Only report stderr as error if curl exited with non-zero and we have stderr
-            if result.code ~= 0 and #stderr_buffer > 0 and on_error then
-                on_error("SSE connection failed: " .. table.concat(stderr_buffer, ""))
-            end
-            if on_close then
-                on_close(result.code)
-            end
+            vim.schedule(function()
+                connection.is_connected = false
+                -- Only report stderr as error if curl exited with non-zero and we have stderr
+                if result.code ~= 0 and #stderr_buffer > 0 and on_error then
+                    on_error("SSE connection failed: " .. table.concat(stderr_buffer, ""))
+                end
+                if on_close then
+                    on_close(result.code)
+                end
+            end)
         end)
-    end)
 
     --- Close the SSE connection
     function connection:close()
@@ -902,30 +902,30 @@ function M.start_server_for_cwd(callback)
                 end
             end,
         }, function(result)
-            -- Server process exited
-            vim.schedule(function()
-                if callback_invoked then
-                    -- Callback already invoked (success or timeout), just clean up
-                    -- Unregister from registry
-                    unregister_server(cwd)
-                    config.state.servers[cwd] = nil
-                    return
-                end
-                if config.state.servers[cwd] and config.state.servers[cwd].starting then
-                    -- Failed to start
-                    callback_invoked = true
-                    config.state.servers[cwd] = nil
-                    local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
+                -- Server process exited
+                vim.schedule(function()
+                    if callback_invoked then
+                        -- Callback already invoked (success or timeout), just clean up
+                        -- Unregister from registry
+                        unregister_server(cwd)
+                        config.state.servers[cwd] = nil
+                        return
+                    end
+                    if config.state.servers[cwd] and config.state.servers[cwd].starting then
+                        -- Failed to start
+                        callback_invoked = true
+                        config.state.servers[cwd] = nil
+                        local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
                         "Server exited unexpectedly"
-                    callback(false, error_msg)
-                else
-                    -- Server stopped (expected or unexpected)
-                    -- Unregister from registry
-                    unregister_server(cwd)
-                    config.state.servers[cwd] = nil
-                end
+                        callback(false, error_msg)
+                    else
+                        -- Server stopped (expected or unexpected)
+                        -- Unregister from registry
+                        unregister_server(cwd)
+                        config.state.servers[cwd] = nil
+                    end
+                end)
             end)
-        end)
 
         -- Store process reference immediately so we can track it
         if config.state.servers[cwd] then
