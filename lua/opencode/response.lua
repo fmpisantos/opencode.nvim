@@ -163,10 +163,16 @@ end
 --- - session.error: Errors
 --- - todo.updated: Todo list updates
 ---@param state SSEState State to update
----@param event_type string|nil Event type
+---@param event_type string|nil Event type (from SSE or top-level JSON)
 ---@param event_data table|nil Event data (properties field from SSE)
 ---@return boolean changed Whether state changed (for UI updates)
 function M.process_sse_event(state, event_type, event_data)
+    -- Try to extract event_type from event_data if not provided at top level
+    -- OpenCode may send the type inside the properties/data object
+    if not event_type and event_data and type(event_data) == "table" then
+        event_type = event_data.type
+    end
+
     if not event_type or not event_data then
         return false
     end

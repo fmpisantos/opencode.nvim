@@ -388,16 +388,34 @@ function M.connect_event_stream(server_url, on_event, on_error, on_close)
 
             for line in event_text:gmatch("[^\r\n]+") do
                 if line:match("^event:%s*") then
-                    event_type = line:gsub("^event:%s*", "")
+                    -- SSE event: line (may be present but we prefer type from JSON data)
+                    local sse_event = line:gsub("^event:%s*", "")
+                    if sse_event ~= "" and not event_type then
+                        event_type = sse_event
+                    end
                 elseif line:match("^data:%s*") then
                     local data_str = line:gsub("^data:%s*", "")
                     -- Try to parse as JSON
                     local ok, parsed = pcall(vim.json.decode, data_str)
                     if ok then
-                        -- SSE events from opencode server wrap data in "properties" field
-                        -- Unwrap it for easier consumption by event handlers
-                        if type(parsed) == "table" and parsed.properties then
-                            event_data = parsed.properties
+                        -- OpenCode server events have structure: { type: "...", properties: {...} }
+                        -- Or in some cases: { properties: { type: "...", ... } }
+                        -- Extract the event type from the JSON data itself
+                        if type(parsed) == "table" then
+                            -- Get event type from the JSON data (takes precedence over SSE event: line)
+                            if parsed.type then
+                                event_type = parsed.type
+                            end
+                            -- Unwrap properties field for easier consumption by event handlers
+                            if parsed.properties then
+                                event_data = parsed.properties
+                                -- Also check for type inside properties (fallback)
+                                if not event_type and type(parsed.properties) == "table" and parsed.properties.type then
+                                    event_type = parsed.properties.type
+                                end
+                            else
+                                event_data = parsed
+                            end
                         else
                             event_data = parsed
                         end
