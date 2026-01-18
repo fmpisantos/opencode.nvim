@@ -360,47 +360,61 @@ function M.stop_server_for_cwd()
     return false
 end
 
+--- Spawn a detached process to kill a PID
+--- This is used during VimLeavePre to ensure the server is killed even after Neovim exits
+---@param pid number Process ID to kill
+local function spawn_detached_kill(pid)
+    -- Use sh -c to run kill in background, fully detached from Neovim
+    -- The process will continue running after Neovim exits
+    local handle, _ = vim.uv.spawn("sh", {
+        args = { "-c", string.format("kill -9 %d 2>/dev/null; exit 0", pid) },
+        detached = true,
+        hide = true,
+    }, function() end) -- Empty callback, we don't care about the result
+
+    if handle then
+        -- Unref so Neovim doesn't wait for this process
+        handle:unref()
+    end
+end
+
 --- Stop all servers (for cleanup)
 --- For external servers, only removes from local state (doesn't kill the process)
----@param force? boolean If true, use SIGKILL immediately (default: false, use SIGTERM first)
+---@param force? boolean If true, use SIGKILL via detached process (default: false, use SIGTERM first)
 ---@return number count Number of servers stopped
 function M.stop_all_servers(force)
     local count = 0
-    vim.notify('stop_all_servers invoked', vim.log.levels.INFO)
     local servers_to_stop = {}
 
     -- Collect all servers we own (with processes, not external)
     for cwd, srv in pairs(config.state.servers) do
         if srv.process and not srv.external then
-            table.insert(servers_to_stop, { cwd = cwd, process = srv.process })
-            count = count + 1
-        vim.notify(string.format('Stopping server process for cwd: %s', cwd), vim.log.levels.INFO)
+            local pid = srv.process.pid
+            if pid then
+                table.insert(servers_to_stop, { cwd = cwd, process = srv.process, pid = pid })
+                count = count + 1
+            end
         end
     end
 
     if count > 0 then
         if force then
-            -- Immediate kill
+            -- Spawn detached kill processes - used during VimLeavePre
+            -- These will continue running after Neovim exits
             for _, srv in ipairs(servers_to_stop) do
-                pcall(function() srv.process:kill(9) end) -- SIGKILL
+                spawn_detached_kill(srv.pid)
                 -- Unregister from the global registry
                 unregister_server(srv.cwd)
             end
         else
-            -- Graceful shutdown: SIGTERM first
+            -- Graceful shutdown: SIGTERM first, then detached SIGKILL
             for _, srv in ipairs(servers_to_stop) do
                 pcall(function() srv.process:kill(15) end) -- SIGTERM
                 -- Unregister from the global registry
                 unregister_server(srv.cwd)
+                -- Spawn detached SIGKILL as fallback (no-op if process already dead)
+                spawn_detached_kill(srv.pid)
             end
-            -- Schedule force kill after a short delay if still running
-            vim.defer_fn(function()
-                for _, srv in ipairs(servers_to_stop) do
-                    -- Check if process is still running and force kill
-                    local success, err = pcall(function() srv.process:kill(9) end) -- SIGKILL
-                    vim.notify(string.format('Force-killing process: %s | Success: %s | Error: %s', tostring(srv.process.pid), tostring(success), tostring(err)), vim.log.levels.INFO)
-                end
-            end, 1000)
         end
     end
 
