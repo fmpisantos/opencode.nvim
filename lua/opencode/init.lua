@@ -367,6 +367,9 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
     vim.keymap.set("n", "q", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
     vim.keymap.set("n", "<Esc>", save_draft_and_close, { buffer = buf, noremap = true, silent = true })
 
+    -- Submit prompt with Enter in normal mode (same as :w)
+    vim.keymap.set("n", "<CR>", submit_prompt, { buffer = buf, noremap = true, silent = true, desc = "Submit prompt" })
+
     -- Keymap to attach floating window to a regular window
     vim.keymap.set({ "n", "i" }, "<C-x><C-e>", attach_to_window,
         { buffer = buf, noremap = true, silent = true, desc = "Attach prompt to window" })
