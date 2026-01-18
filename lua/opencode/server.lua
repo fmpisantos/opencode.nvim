@@ -119,7 +119,7 @@ end
 ---@param callback function Called with (success, response_data_or_error)
 local function http_request(server_url, method, path, body, callback)
     local url = server_url .. path
-    local cmd = { "curl", "-s", "-X", method }
+    local cmd = { "curl", "-s", "-X", method, "--fail-with-body" }
 
     -- Add content type and body for requests with body
     if body then
@@ -134,7 +134,15 @@ local function http_request(server_url, method, path, body, callback)
     vim.system(cmd, { text = true }, function(result)
         vim.schedule(function()
             if result.code ~= 0 then
-                callback(false, "curl failed with code " .. result.code)
+                -- curl failed - could be connection error or HTTP error (--fail-with-body)
+                local error_msg = "curl failed with code " .. result.code
+                if result.stderr and result.stderr ~= "" then
+                    error_msg = error_msg .. ": " .. result.stderr
+                elseif result.stdout and result.stdout ~= "" then
+                    -- --fail-with-body includes response body in stdout even on HTTP errors
+                    error_msg = error_msg .. ": " .. result.stdout
+                end
+                callback(false, error_msg)
                 return
             end
 
@@ -143,9 +151,11 @@ local function http_request(server_url, method, path, body, callback)
                 if ok then
                     callback(true, data)
                 else
-                    callback(true, result.stdout)
+                    -- JSON decode failed - return as string with warning
+                    callback(false, "Invalid JSON response: " .. result.stdout:sub(1, 100))
                 end
             else
+                -- Empty response
                 callback(true, nil)
             end
         end)
@@ -181,6 +191,241 @@ end
 ---@param callback function Called with (success, config_or_error)
 function M.get_server_config(server_url, callback)
     http_request(server_url, "GET", "/config", nil, callback)
+end
+
+--- Create a new session via HTTP API
+---@param server_url string Server base URL
+---@param title? string Optional session title
+---@param callback function Called with (success, session_or_error)
+function M.create_session(server_url, title, callback)
+    local body = nil
+    if title then
+        body = { title = title }
+    end
+    http_request(server_url, "POST", "/session", body, callback)
+end
+
+--- Send a message to a session via HTTP API (async, uses prompt_async)
+--- This sends the message and returns immediately. Use event stream to get response.
+---@param server_url string Server base URL
+---@param session_id string Session ID
+---@param message string The message text
+---@param opts? table Optional { agent?: string, model?: string }
+---@param callback function Called with (success, error_or_nil)
+function M.send_message_async(server_url, session_id, message, opts, callback)
+    opts = opts or {}
+    local body = {
+        parts = {
+            {
+                type = "text",
+                text = message,
+            }
+        }
+    }
+    if opts.agent then
+        body.agent = opts.agent
+    end
+    if opts.model then
+        body.model = opts.model
+    end
+
+    local path = "/session/" .. session_id .. "/prompt_async"
+    http_request(server_url, "POST", path, body, function(success, result)
+        if callback then
+            callback(success, success and nil or tostring(result))
+        end
+    end)
+end
+
+--- List all sessions via HTTP API
+---@param server_url string Server base URL
+---@param callback function Called with (success, sessions_or_error)
+function M.list_sessions(server_url, callback)
+    http_request(server_url, "GET", "/session", nil, callback)
+end
+
+--- Get or create a session for use with HTTP API
+--- Returns an existing session if one is active, or creates a new one
+---@param server_url string Server base URL
+---@param opts? table { session_id?: string, title?: string }
+---@param callback function Called with (success, session_id_or_error)
+function M.get_or_create_session(server_url, opts, callback)
+    opts = opts or {}
+
+    -- If we already have a session ID, use it
+    if opts.session_id then
+        callback(true, opts.session_id)
+        return
+    end
+
+    -- Check if we have a session in server state
+    local srv = M.get_server_for_cwd()
+    if srv and srv.session_id then
+        callback(true, srv.session_id)
+        return
+    end
+
+    -- Create a new session
+    M.create_session(server_url, opts.title, function(success, result)
+        if success and type(result) == "table" and result.id then
+            -- Store the session ID
+            M.set_server_session(result.id)
+            callback(true, result.id)
+        elseif success then
+            -- Got a response but it wasn't a valid session object
+            callback(false, "Invalid session response: expected table with 'id' field, got " .. type(result))
+        else
+            callback(false, result)
+        end
+    end)
+end
+
+--- Abort a running session
+---@param server_url string Server base URL
+---@param session_id string Session ID to abort
+---@param callback? function Called with (success, error_or_nil)
+function M.abort_session(server_url, session_id, callback)
+    local path = "/session/" .. session_id .. "/abort"
+    http_request(server_url, "POST", path, nil, function(success, result)
+        if callback then
+            callback(success, success and nil or tostring(result))
+        end
+    end)
+end
+
+-- =============================================================================
+-- SSE Event Stream
+-- =============================================================================
+
+---@class SSEConnection
+---@field process table|nil vim.system process object
+---@field url string Server URL
+---@field is_connected boolean Whether the connection is active
+---@field on_event function Callback for events
+---@field on_error function|nil Callback for errors
+---@field on_close function|nil Callback when connection closes
+
+--- Create an SSE connection to the server's event stream
+--- The event stream provides real-time updates for messages, tool calls, etc.
+---@param server_url string Server base URL
+---@param on_event function Called with (event_type, event_data) for each event
+---@param on_error? function Called with (error_message) on errors
+---@param on_close? function Called when connection closes
+---@return SSEConnection connection Object with :close() method
+function M.connect_event_stream(server_url, on_event, on_error, on_close)
+    local url = server_url .. "/event"
+    local connection = {
+        process = nil,
+        url = url,
+        is_connected = false,
+        on_event = on_event,
+        on_error = on_error,
+        on_close = on_close,
+    }
+
+    -- Buffer for incomplete SSE data
+    local buffer = ""
+
+    -- Parse SSE data format:
+    -- event: <event_type>
+    -- data: <json_data>
+    -- (blank line)
+    local function parse_sse_chunk(chunk)
+        buffer = buffer .. chunk
+        local events = {}
+
+        -- SSE events are separated by double newlines
+        while true do
+            local event_end = buffer:find("\n\n")
+            if not event_end then
+                break
+            end
+
+            local event_text = buffer:sub(1, event_end - 1)
+            buffer = buffer:sub(event_end + 2)
+
+            -- Parse the event
+            local event_type = nil
+            local event_data = nil
+
+            for line in event_text:gmatch("[^\r\n]+") do
+                if line:match("^event:%s*") then
+                    event_type = line:gsub("^event:%s*", "")
+                elseif line:match("^data:%s*") then
+                    local data_str = line:gsub("^data:%s*", "")
+                    -- Try to parse as JSON
+                    local ok, parsed = pcall(vim.json.decode, data_str)
+                    if ok then
+                        event_data = parsed
+                    else
+                        event_data = data_str
+                    end
+                end
+            end
+
+            if event_type or event_data then
+                table.insert(events, { type = event_type, data = event_data })
+            end
+        end
+
+        return events
+    end
+
+    -- Use curl with -N (no buffering) for SSE
+    -- Use --fail-with-body to get proper error handling
+    local cmd = {
+        "curl", "-s", "-N",
+        "-H", "Accept: text/event-stream",
+        url
+    }
+
+    -- Accumulate stderr to report only on connection close with non-zero exit
+    local stderr_buffer = {}
+
+    connection.process = vim.system(cmd, {
+        stdout = function(_, data)
+            if data then
+                vim.schedule(function()
+                    local events = parse_sse_chunk(data)
+                    for _, event in ipairs(events) do
+                        if event.type == "server.connected" then
+                            connection.is_connected = true
+                        end
+                        on_event(event.type, event.data)
+                    end
+                end)
+            end
+        end,
+        stderr = function(_, data)
+            -- Accumulate stderr instead of treating each chunk as an error
+            -- curl may output non-error diagnostics to stderr
+            if data then
+                table.insert(stderr_buffer, data)
+            end
+        end,
+    }, function(result)
+        vim.schedule(function()
+            connection.is_connected = false
+            -- Only report stderr as error if curl exited with non-zero and we have stderr
+            if result.code ~= 0 and #stderr_buffer > 0 and on_error then
+                on_error("SSE connection failed: " .. table.concat(stderr_buffer, ""))
+            end
+            if on_close then
+                on_close(result.code)
+            end
+        end)
+    end)
+
+    --- Close the SSE connection
+    function connection:close()
+        self.is_connected = false
+        if self.process then
+            pcall(function() self.process:kill(9) end)
+            self.process = nil
+        end
+    end
+
+    return connection
 end
 
 -- =============================================================================

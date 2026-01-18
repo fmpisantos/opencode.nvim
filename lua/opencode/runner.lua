@@ -8,9 +8,11 @@ local M = {}
 -- This module handles running opencode commands in two modes:
 -- - "quick" mode: Uses `opencode run` directly for one-shot queries
 -- - "agentic" mode: Starts a local server via `opencode serve` and uses
---                   `opencode run --attach <url>` to connect to it
+--                   the HTTP API (POST /session/:id/prompt_async) with SSE
+--                   event stream for real-time responses. This allows
+--                   specifying the agent per-message while keeping MCP servers warm.
 --
--- See: https://opencode.ai/docs/cli/#attach
+-- See: https://opencode.ai/docs/server/
 
 local config = require("opencode.config")
 local utils = require("opencode.utils")
@@ -409,10 +411,10 @@ function M.run_opencode(prompt, files, source_file)
         execute()
     end
 
-    -- Function to execute via CLI with --attach flag (agentic mode)
-    -- Uses `opencode run --attach <url>` as per https://opencode.ai/docs/cli/#attach
-    -- Note: Agent is set via HTTP API (PATCH /config) before execution
-    ---@param server_url string Server URL to attach to
+    -- Function to execute via HTTP API (agentic mode)
+    -- Uses POST /session/:id/prompt_async with SSE event stream for responses
+    -- This allows specifying the agent per-message while keeping MCP servers warm
+    ---@param server_url string Server URL to connect to
     local function execute_agentic(server_url)
         -- Get model to use
         local model_to_use = state.selected_model
@@ -421,36 +423,17 @@ function M.run_opencode(prompt, files, source_file)
             model_to_use = srv.model
         end
 
-        -- Determine session to use (continue existing or let CLI create new)
+        -- Determine session to use (continue existing or create new)
         local session_to_use = cli_session_id
         if not session_to_use and srv and srv.session_id then
             session_to_use = srv.session_id
         end
 
-        -- Build command using --attach flag
-        -- From docs: opencode run --attach http://localhost:4096 "message"
-        local base_cmd = { "opencode", "run", "--attach", server_url, "--format", "json" }
-
-        -- Add --model flag if a model is selected
-        if model_to_use and model_to_use ~= "" then
-            table.insert(base_cmd, "--model")
-            table.insert(base_cmd, model_to_use)
-        end
-
-        -- Add --session flag if continuing an existing session
-        if session_to_use then
-            table.insert(base_cmd, "--session")
-            table.insert(base_cmd, session_to_use)
-        end
-
-        -- Build the full command (with prompt as argument)
-        local cmd = utils.build_opencode_cmd(base_cmd, prompt, {})
-
-        -- Build header for this query
-        local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
+        -- Build header for this query (showing HTTP API mode)
+        local api_info = string.format("POST /session/:id/prompt_async [agent=%s]", agent)
         local header_lines = {
             "**Mode:** [agentic] → " .. server_url,
-            "**Command:** `" .. cmd_display .. "`",
+            "**API:** `" .. api_info .. "`",
             "",
             "**Query:**",
         }
@@ -468,17 +451,17 @@ function M.run_opencode(prompt, files, source_file)
         local full_header = vim.deepcopy(display_prefix)
         vim.list_extend(full_header, header_lines)
 
-        -- State for streaming updates (reuse same pattern as quick mode)
-        local json_lines = {}
-        local stderr_output = {}
-        local system_obj = nil
+        -- State for SSE streaming updates
+        local sse_state = response.create_sse_state()
+        local sse_connection = nil
         local is_running = true
         local run_start_time = nil
         local spinner_idx = 1
         local update_timer = nil
         local request_id = nil
+        local timeout_timer = nil
 
-        -- Function to update display with current streaming state
+        -- Function to update display with current SSE state
         local function update_display()
             if not vim.api.nvim_buf_is_valid(buf) then
                 return
@@ -487,18 +470,15 @@ function M.run_opencode(prompt, files, source_file)
             local display_lines = vim.deepcopy(full_header)
             local model_info = model_to_use and (" [" .. config.get_model_display() .. "]") or ""
 
-            -- Add spinner
+            -- Add spinner if running
             local spinner_char = config.SPINNER_FRAMES[spinner_idx]
             spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
 
-            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = response.parse_streaming_response(json_lines)
-
-            -- Capture CLI session ID if we don't have one yet
-            if new_cli_session_id and not state.current_session_id then
-                state.current_session_id = new_cli_session_id
+            -- Capture session ID if we don't have one yet
+            if sse_state.session_id and not state.current_session_id then
+                state.current_session_id = sse_state.session_id
                 vim.b[buf].opencode_session_id = state.current_session_id
-                -- Also update server session
-                server.set_server_session(new_cli_session_id)
+                server.set_server_session(sse_state.session_id)
             end
 
             if is_running then
@@ -510,13 +490,14 @@ function M.run_opencode(prompt, files, source_file)
                 end
                 local status_text
 
-                if is_thinking then
+                if sse_state.is_thinking then
                     status_text = "**Status:** Thinking" .. elapsed .. " " .. spinner_char
-                elseif current_tool then
-                    if tool_status == "calling" or tool_status == "running" then
-                        status_text = "**Status:** Executing `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+                elseif sse_state.current_tool then
+                    local tool_status = sse_state.tool_status or "running"
+                    if tool_status == "pending" or tool_status == "running" then
+                        status_text = "**Status:** Executing `" .. sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
                     else
-                        status_text = "**Status:** Completed `" .. current_tool .. "`" .. elapsed .. " " .. spinner_char
+                        status_text = "**Status:** Completed `" .. sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
                     end
                 else
                     status_text = "**Status:** Running" .. model_info .. elapsed .. " " .. spinner_char
@@ -527,18 +508,20 @@ function M.run_opencode(prompt, files, source_file)
             end
 
             -- Add todo list if present
-            if todos and #todos > 0 then
-                vim.list_extend(display_lines, utils.format_todo_list(todos))
+            if sse_state.todos and #sse_state.todos > 0 then
+                vim.list_extend(display_lines, utils.format_todo_list(sse_state.todos))
             end
 
-            if err then
-                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
-                utils.append_stderr_block(display_lines, stderr_output)
-            elseif #response_lines > 0 then
-                vim.list_extend(display_lines, response_lines)
-            elseif not is_running then
-                table.insert(display_lines, "No response received.")
-                utils.append_stderr_block(display_lines, stderr_output)
+            -- Add error or response
+            if sse_state.error_message then
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(sse_state.error_message))
+            else
+                local response_lines = response.get_sse_response_lines(sse_state)
+                if #response_lines > 0 then
+                    vim.list_extend(display_lines, response_lines)
+                elseif not is_running then
+                    table.insert(display_lines, "No response received.")
+                end
             end
 
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
@@ -563,20 +546,33 @@ function M.run_opencode(prompt, files, source_file)
             end)
         end
 
+        -- Cleanup function for when request completes or is cancelled
+        local function cleanup()
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
+            if timeout_timer then
+                vim.fn.timer_stop(timeout_timer)
+                timeout_timer = nil
+            end
+            if sse_connection then
+                sse_connection:close()
+                sse_connection = nil
+            end
+            if request_id then
+                requests.unregister_request(request_id)
+                request_id = nil
+            end
+        end
+
         local function handle_timeout()
             vim.schedule(function()
-                is_running = false
-                if update_timer then
-                    vim.fn.timer_stop(update_timer)
-                    update_timer = nil
-                end
-                if system_obj then
-                    system_obj:kill(9)
-                end
+                cleanup()
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
                     table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
-                    utils.append_stderr_block(display_lines, stderr_output)
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                     -- Save session even on timeout (only if we have a session ID)
                     if state.current_session_id then
@@ -586,129 +582,206 @@ function M.run_opencode(prompt, files, source_file)
             end)
         end
 
-        local function execute()
+        local function finalize()
+            cleanup()
+
+            -- Final update
+            local display_lines = vim.deepcopy(full_header)
+
+            -- Add error or response
+            if sse_state.error_message then
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(sse_state.error_message))
+            else
+                local response_lines = response.get_sse_response_lines(sse_state)
+                if #response_lines > 0 then
+                    vim.list_extend(display_lines, response_lines)
+                else
+                    table.insert(display_lines, "No response received.")
+                end
+            end
+
+            -- Update buffer if still valid
+            if vim.api.nvim_buf_is_valid(buf) then
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+            end
+
+            -- Save session to file (only if we have a session ID)
+            if state.current_session_id then
+                session.save_session(state.current_session_id, table.concat(display_lines, "\n"))
+            end
+        end
+
+        local function execute_with_session(final_session_id)
             -- Start run timer
             run_start_time = vim.loop.now()
 
             -- Only start timeout timer if timeout_ms is not -1
             if state.user_config.timeout_ms ~= -1 then
-                vim.fn.timer_start(state.user_config.timeout_ms, function()
+                timeout_timer = vim.fn.timer_start(state.user_config.timeout_ms, function()
                     if is_running then
                         handle_timeout()
                     end
                 end)
             end
 
-            -- Use the server's cwd to ensure we're running in the same project context
-            -- This is important for --attach to work correctly
-            local run_cwd = server.get_server_cwd() or config.get_cwd()
+            -- Track the message we sent to know when our response is complete
+            local our_session_id = final_session_id
+            local response_started = false
+            local idle_after_response = false
+            local sse_connected = false
+            local message_sent = false
 
-            -- Use streaming stdout handler (same as quick mode)
-            system_obj = vim.system(cmd, {
-                cwd = run_cwd,
-                stdout = function(_, data)
-                    if data then
-                        vim.schedule(function()
-                            -- Parse incoming data line by line
-                            for line in data:gmatch("[^\r\n]+") do
-                                table.insert(json_lines, line)
-                            end
-                            update_display()
-                        end)
-                    end
-                end,
-                stderr = function(_, data)
-                    if data then
-                        vim.schedule(function()
-                            for line in data:gmatch("[^\r\n]+") do
-                                table.insert(stderr_output, line)
-                            end
-                        end)
-                    end
-                end,
-            }, function(result)
-                vim.schedule(function()
-                    is_running = false
-                    if update_timer then
-                        vim.fn.timer_stop(update_timer)
-                        update_timer = nil
-                    end
+            -- Function to send the message (called after SSE connects)
+            local function send_message()
+                if message_sent then return end
+                message_sent = true
 
-                    -- Unregister the request
-                    if request_id then
-                        requests.unregister_request(request_id)
-                    end
-
-                    -- Final update
-                    local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(json_lines)
-                    local display_lines = vim.deepcopy(full_header)
-
-                    -- Ensure we have the CLI session ID for saving
-                    if final_cli_session_id and not state.current_session_id then
-                        state.current_session_id = final_cli_session_id
-                        vim.b[buf].opencode_session_id = state.current_session_id
-                        server.set_server_session(final_cli_session_id)
-                    end
-
-                    if err then
-                        table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
-                        utils.append_stderr_block(display_lines, stderr_output)
-                    elseif #response_lines == 0 then
-                        if result.code ~= 0 then
-                            table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
-                            utils.append_stderr_block(display_lines, stderr_output)
-                        else
-                            table.insert(display_lines, "No response received.")
-                            utils.append_stderr_block(display_lines, stderr_output)
+                server.send_message_async(
+                    server_url,
+                    final_session_id,
+                    prompt,
+                    { agent = agent, model = model_to_use },
+                    function(success, error_msg)
+                        if not success then
+                            vim.schedule(function()
+                                sse_state.error_message = "Failed to send message: " .. tostring(error_msg)
+                                finalize()
+                            end)
                         end
-                    else
-                        vim.list_extend(display_lines, response_lines)
+                        -- If success, response will come through SSE events
                     end
-
-                    -- Update buffer if still valid
-                    if vim.api.nvim_buf_is_valid(buf) then
-                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
-                    end
-
-                    -- Save session to file (only if we have a CLI session ID)
-                    if state.current_session_id then
-                        session.save_session(state.current_session_id, table.concat(display_lines, "\n"))
-                    end
-                end)
-            end)
-
-            -- Register request for cancellation tracking
-            local cleanup_fn = function()
-                is_running = false
-                if update_timer then
-                    vim.fn.timer_stop(update_timer)
-                    update_timer = nil
-                end
+                )
             end
-            request_id = requests.register_request(system_obj, cleanup_fn)
 
-            -- Set up autocmd to kill process if buffer is deleted
+            -- Connect to SSE event stream
+            sse_connection = server.connect_event_stream(
+                server_url,
+                -- on_event callback
+                function(event_type, event_data)
+                    if not is_running then return end
+
+                    -- Handle server.connected event - now safe to send message
+                    if event_type == "server.connected" then
+                        sse_connected = true
+                        vim.schedule(send_message)
+                        return
+                    end
+
+                    -- Filter events for our session
+                    local event_session_id = event_data and (event_data.sessionID or (event_data.info and event_data.info.sessionID) or (event_data.part and event_data.part.sessionID))
+                    if event_session_id and event_session_id ~= our_session_id then
+                        return -- Ignore events for other sessions
+                    end
+
+                    -- Process the event
+                    local changed = response.process_sse_event(sse_state, event_type, event_data)
+
+                    -- Track when we start receiving response content
+                    if event_type == "message.part.updated" and event_data.part then
+                        if event_data.part.type == "text" or event_data.part.type == "tool" then
+                            response_started = true
+                        end
+                    end
+
+                    -- Check for completion: session.idle after we've started receiving response
+                    if event_type == "session.idle" and response_started then
+                        idle_after_response = true
+                        -- Small delay to ensure all parts are received
+                        vim.defer_fn(function()
+                            if is_running and idle_after_response then
+                                finalize()
+                            end
+                        end, 100)
+                    end
+
+                    -- Check for session.status busy -> idle transition
+                    if event_type == "session.status" and event_data.status then
+                        if event_data.status.type == "idle" and response_started then
+                            idle_after_response = true
+                            vim.defer_fn(function()
+                                if is_running and idle_after_response then
+                                    finalize()
+                                end
+                            end, 100)
+                        end
+                    end
+
+                    if changed then
+                        vim.schedule(update_display)
+                    end
+                end,
+                -- on_error callback
+                function(error_msg)
+                    if is_running then
+                        sse_state.error_message = error_msg
+                        finalize()
+                    end
+                end,
+                -- on_close callback
+                function(exit_code)
+                    if is_running then
+                        -- SSE connection closed unexpectedly
+                        local response_lines = response.get_sse_response_lines(sse_state)
+                        if not sse_state.error_message and #response_lines > 0 then
+                            -- We got some response, consider it complete
+                            finalize()
+                        else
+                            sse_state.error_message = "SSE connection closed unexpectedly (exit code: " .. tostring(exit_code) .. ")"
+                            finalize()
+                        end
+                    end
+                end
+            )
+
+            -- Fallback: if SSE doesn't send server.connected within 2s, send message anyway
+            -- This handles cases where the server may not send this event
+            vim.defer_fn(function()
+                if is_running and not sse_connected then
+                    vim.schedule(send_message)
+                end
+            end, 2000)
+
+            -- Register for cancellation tracking (use a pseudo object with kill method)
+            local cancel_obj = {
+                kill = function()
+                    cleanup()
+                end
+            }
+            request_id = requests.register_request(cancel_obj, cleanup)
+
+            -- Set up autocmd to cleanup if buffer is deleted
             vim.api.nvim_create_autocmd("BufDelete", {
                 buffer = buf,
                 once = true,
                 callback = function()
-                    if system_obj and is_running then
-                        pcall(function() system_obj:kill(9) end)
-                    end
-                    if update_timer then
-                        vim.fn.timer_stop(update_timer)
-                    end
-                    if request_id then
-                        requests.unregister_request(request_id)
-                    end
+                    cleanup()
                 end,
             })
         end
 
-        -- Start spinner and execute immediately
-        update_display()
-        start_update_timer()
-        execute()
+        -- Get or create session, then execute
+        server.get_or_create_session(server_url, { session_id = session_to_use }, function(success, session_id_or_error)
+            vim.schedule(function()
+                if success then
+                    -- Update session state
+                    state.current_session_id = session_id_or_error
+                    vim.b[buf].opencode_session_id = session_id_or_error
+                    server.set_server_session(session_id_or_error)
+
+                    -- Start spinner and execute
+                    update_display()
+                    start_update_timer()
+                    execute_with_session(session_id_or_error)
+                else
+                    -- Failed to get/create session
+                    if vim.api.nvim_buf_is_valid(buf) then
+                        local display_lines = vim.deepcopy(full_header)
+                        table.insert(display_lines, "**Error:** Failed to create session: " .. tostring(session_id_or_error))
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+                    end
+                end
+            end)
+        end)
     end
 
     -- Execute based on mode
@@ -720,18 +793,12 @@ function M.run_opencode(prompt, files, source_file)
             "Starting opencode server... " .. config.SPINNER_FRAMES[1],
         })
 
-        -- Ensure server is running, then set agent via HTTP API and execute with --attach
+        -- Ensure server is running, then execute via HTTP API
+        -- Note: Agent is now passed per-message via POST /session/:id/prompt_async
         server.ensure_server_running(function(success, url_or_error)
             vim.schedule(function()
                 if success then
-                    -- Set the agent via HTTP API before executing
-                    -- This ensures the server uses the correct agent without --agent flag
-                    server.set_server_agent(agent, function(agent_success, agent_err)
-                        if not agent_success then
-                            vim.notify("Warning: Failed to set agent on server: " .. tostring(agent_err), vim.log.levels.WARN)
-                        end
-                        execute_agentic(url_or_error)
-                    end)
+                    execute_agentic(url_or_error)
                 else
                     -- Server failed to start
                     if vim.api.nvim_buf_is_valid(buf) then

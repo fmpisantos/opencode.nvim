@@ -222,30 +222,13 @@ local function setup_commands(opencode)
     })
 
     -- Agent management (build/plan)
+    -- Agent is now passed per-message via HTTP API, so we just track it locally
     vim.api.nvim_create_user_command("OpenCodeAgent", function(opts)
         if opts.args and opts.args ~= "" then
             opencode.SetAgent(opts.args)
         else
-            local local_agent = opencode.GetAgent()
-            local port = opencode.GetCurrentServerPort()
-            if port then
-                -- Also fetch server's default_agent for comparison
-                local url = string.format("http://127.0.0.1:%s/config", port)
-                vim.system({ "curl", "-s", url }, { text = true }, function(result)
-                    vim.schedule(function()
-                        local server_agent = "unknown"
-                        if result.code == 0 and result.stdout then
-                            local ok, config_data = pcall(vim.json.decode, result.stdout)
-                            if ok and config_data then
-                                server_agent = config_data.default_agent or "not set (defaults to build)"
-                            end
-                        end
-                        vim.notify(string.format("Agent - Local: %s | Server default_agent: %s", local_agent, server_agent), vim.log.levels.INFO)
-                    end)
-                end)
-            else
-                vim.notify("Current agent: " .. local_agent .. " (server not running)", vim.log.levels.INFO)
-            end
+            local current_agent = opencode.GetAgent()
+            vim.notify("Current agent: " .. current_agent .. " (passed per-message via HTTP API)", vim.log.levels.INFO)
         end
     end, {
         nargs = "?",
@@ -256,89 +239,13 @@ local function setup_commands(opencode)
         if opts.args and opts.args ~= "" then
             opencode.SetAgent(opts.args)
         else
-            local local_agent = opencode.GetAgent()
-            local port = opencode.GetCurrentServerPort()
-            if port then
-                -- Also fetch server's default_agent for comparison
-                local url = string.format("http://127.0.0.1:%s/config", port)
-                vim.system({ "curl", "-s", url }, { text = true }, function(result)
-                    vim.schedule(function()
-                        local server_agent = "unknown"
-                        if result.code == 0 and result.stdout then
-                            local ok, config_data = pcall(vim.json.decode, result.stdout)
-                            if ok and config_data then
-                                server_agent = config_data.default_agent or "not set (defaults to build)"
-                            end
-                        end
-                        vim.notify(string.format("Agent - Local: %s | Server default_agent: %s", local_agent, server_agent), vim.log.levels.INFO)
-                    end)
-                end)
-            else
-                vim.notify("Current agent: " .. local_agent .. " (server not running)", vim.log.levels.INFO)
-            end
+            local current_agent = opencode.GetAgent()
+            vim.notify("Current agent: " .. current_agent .. " (passed per-message via HTTP API)", vim.log.levels.INFO)
         end
     end, {
         nargs = "?",
         complete = function() return { "build", "plan" } end,
         desc = "Get or set OpenCode agent (build/plan)",
-    })
-
-    -- Debug command to test PATCH /config directly
-    vim.api.nvim_create_user_command("OCAgentDebug", function(opts)
-        local port = opencode.GetCurrentServerPort()
-        if not port then
-            vim.notify("OpenCode server is not running", vim.log.levels.ERROR)
-            return
-        end
-
-        local agent = opts.args and opts.args ~= "" and opts.args or "plan"
-        local url = string.format("http://127.0.0.1:%s/config", port)
-        local body = vim.json.encode({ default_agent = agent })
-
-        vim.notify("Testing PATCH /config with: " .. body, vim.log.levels.INFO)
-
-        -- First, GET current config
-        vim.system({ "curl", "-s", url }, { text = true }, function(get_result)
-            vim.schedule(function()
-                local before_agent = "unknown"
-                if get_result.code == 0 and get_result.stdout then
-                    local ok, data = pcall(vim.json.decode, get_result.stdout)
-                    if ok and data then
-                        before_agent = data.default_agent or "not set"
-                    end
-                end
-                vim.notify("Before PATCH - default_agent: " .. before_agent, vim.log.levels.INFO)
-
-                -- Now PATCH
-                vim.system({
-                    "curl", "-s", "-X", "PATCH", url,
-                    "-H", "Content-Type: application/json",
-                    "-d", body
-                }, { text = true }, function(patch_result)
-                    vim.schedule(function()
-                        vim.notify("PATCH response: " .. (patch_result.stdout or "empty") .. " (exit code: " .. patch_result.code .. ")", vim.log.levels.INFO)
-
-                        -- GET again to verify
-                        vim.system({ "curl", "-s", url }, { text = true }, function(get_result2)
-                            vim.schedule(function()
-                                local after_agent = "unknown"
-                                if get_result2.code == 0 and get_result2.stdout then
-                                    local ok, data = pcall(vim.json.decode, get_result2.stdout)
-                                    if ok and data then
-                                        after_agent = data.default_agent or "not set"
-                                    end
-                                end
-                                vim.notify("After PATCH - default_agent: " .. after_agent, vim.log.levels.INFO)
-                            end)
-                        end)
-                    end)
-                end)
-            end)
-        end)
-    end, {
-        nargs = "?",
-        complete = function() return { "build", "plan" } end,
-        desc = "Debug: Test PATCH /config to set default_agent",
     })
 end
 

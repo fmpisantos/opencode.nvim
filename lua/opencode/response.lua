@@ -122,4 +122,181 @@ function M.parse_streaming_response(json_lines)
     return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id, todos
 end
 
+-- =============================================================================
+-- SSE Event Parsing (for HTTP API mode)
+-- =============================================================================
+
+---@class SSEState
+---@field response_text string Accumulated response text
+---@field is_thinking boolean Whether model is currently thinking
+---@field current_tool string|nil Current tool being executed
+---@field tool_status string|nil Status of the tool execution
+---@field session_id string|nil Current session ID
+---@field message_id string|nil Current message ID
+---@field todos table|nil Current todo list
+---@field error_message string|nil Error message if any
+---@field is_busy boolean Whether the session is busy
+---@field last_text_part_id string|nil ID of the last text part (for full-text updates)
+
+--- Create a new SSE state for tracking streaming responses
+---@return SSEState
+function M.create_sse_state()
+    return {
+        response_text = "",
+        is_thinking = false,
+        current_tool = nil,
+        tool_status = nil,
+        session_id = nil,
+        message_id = nil,
+        todos = nil,
+        error_message = nil,
+        is_busy = false,
+        last_text_part_id = nil,
+    }
+end
+
+--- Process an SSE event and update state
+--- Based on opencode SDK event types:
+--- - message.part.updated: Text, tool, reasoning parts (with optional delta)
+--- - message.updated: Message metadata
+--- - session.status: Busy/idle status
+--- - session.error: Errors
+--- - todo.updated: Todo list updates
+---@param state SSEState State to update
+---@param event_type string|nil Event type
+---@param event_data table|nil Event data (properties field from SSE)
+---@return boolean changed Whether state changed (for UI updates)
+function M.process_sse_event(state, event_type, event_data)
+    if not event_type or not event_data then
+        return false
+    end
+
+    local changed = false
+
+    if event_type == "message.part.updated" then
+        local part = event_data.part
+        local delta = event_data.delta
+
+        if part then
+            -- Capture session ID and message ID
+            if part.sessionID and not state.session_id then
+                state.session_id = part.sessionID
+                changed = true
+            end
+            if part.messageID and not state.message_id then
+                state.message_id = part.messageID
+                changed = true
+            end
+
+            if part.type == "text" then
+                state.is_thinking = false
+                state.current_tool = nil
+
+                if delta then
+                    -- Incremental delta - append to response_text
+                    state.response_text = state.response_text .. delta
+                    state.last_text_part_id = part.id
+                    changed = true
+                elseif part.text and part.text ~= "" then
+                    -- Full text - this could be a replacement or initial full text
+                    -- If it's the same part ID, this is an update (replace)
+                    -- If it's a new part ID, append it
+                    if part.id == state.last_text_part_id then
+                        -- Same part, likely a full replacement - but we already have delta text
+                        -- In practice, servers usually send either deltas OR full text, not both
+                        -- If we already have content, don't replace it
+                        if state.response_text == "" then
+                            state.response_text = part.text
+                            changed = true
+                        end
+                    else
+                        -- New part with full text (no delta) - append it
+                        state.response_text = state.response_text .. part.text
+                        state.last_text_part_id = part.id
+                        changed = true
+                    end
+                end
+
+            elseif part.type == "reasoning" then
+                state.is_thinking = true
+                state.current_tool = nil
+                changed = true
+
+            elseif part.type == "tool" then
+                state.is_thinking = false
+                state.current_tool = part.tool or "unknown tool"
+                if part.state then
+                    state.tool_status = part.state.status or "running"
+                    -- Capture todo list from todowrite tool
+                    if part.tool == "todowrite" and part.state.input and part.state.input.todos then
+                        state.todos = part.state.input.todos
+                    end
+                end
+                changed = true
+            end
+        end
+
+    elseif event_type == "message.updated" then
+        local info = event_data.info
+        if info then
+            if info.sessionID then
+                state.session_id = info.sessionID
+            end
+            if info.id then
+                state.message_id = info.id
+            end
+            -- Check for error in message
+            if info.error then
+                local err = info.error
+                state.error_message = err.data and err.data.message
+                    or err.message
+                    or err.name
+                    or "Unknown error"
+            end
+            changed = true
+        end
+
+    elseif event_type == "session.status" then
+        local status = event_data.status
+        if status then
+            state.is_busy = (status.type == "busy")
+            changed = true
+        end
+
+    elseif event_type == "session.idle" then
+        state.is_busy = false
+        changed = true
+
+    elseif event_type == "session.error" then
+        local err = event_data.error
+        if err then
+            state.error_message = err.data and err.data.message
+                or err.message
+                or err.name
+                or "Unknown error"
+            changed = true
+        end
+
+    elseif event_type == "todo.updated" then
+        if event_data.todos then
+            state.todos = event_data.todos
+            changed = true
+        end
+    end
+
+    return changed
+end
+
+--- Get response lines from SSE state
+---@param state SSEState
+---@return table response_lines Lines of response text
+function M.get_sse_response_lines(state)
+    if state.response_text == "" then
+        return {}
+    end
+    -- Normalize newlines and split
+    local text = state.response_text:gsub("\r\n", "\n"):gsub("\r", "\n")
+    return vim.split(text, "\n", { plain = true })
+end
+
 return M
