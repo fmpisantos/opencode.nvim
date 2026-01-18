@@ -95,16 +95,16 @@ local function get_registered_server_async(cwd, callback)
         "--connect-timeout", "1",
         entry.url .. "/global/health"
     }, { text = true }, function(result)
-            vim.schedule(function()
-                if result.code == 0 and result.stdout and result.stdout:match("^200") then
-                    callback(entry)
-                else
-                    -- Server is not responding, clean up the registry entry
-                    unregister_server(cwd)
-                    callback(nil)
-                end
-            end)
+        vim.schedule(function()
+            if result.code == 0 and result.stdout and result.stdout:match("^200") then
+                callback(entry)
+            else
+                -- Server is not responding, clean up the registry entry
+                unregister_server(cwd)
+                callback(nil)
+            end
         end)
+    end)
 end
 
 -- =============================================================================
@@ -155,7 +155,6 @@ local function http_request(server_url, method, path, body, callback)
             table.insert(debug_cmd, part)
         end
     end
-    vim.print("Curl command:", table.concat(debug_cmd, " "))
     vim.system(cmd, { text = true }, function(result)
         vim.schedule(function()
             if result.code ~= 0 then
@@ -443,17 +442,17 @@ function M.connect_event_stream(server_url, on_event, on_error, on_close)
             end
         end,
     }, function(result)
-            vim.schedule(function()
-                connection.is_connected = false
-                -- Only report stderr as error if curl exited with non-zero and we have stderr
-                if result.code ~= 0 and #stderr_buffer > 0 and on_error then
-                    on_error("SSE connection failed: " .. table.concat(stderr_buffer, ""))
-                end
-                if on_close then
-                    on_close(result.code)
-                end
-            end)
+        vim.schedule(function()
+            connection.is_connected = false
+            -- Only report stderr as error if curl exited with non-zero and we have stderr
+            if result.code ~= 0 and #stderr_buffer > 0 and on_error then
+                on_error("SSE connection failed: " .. table.concat(stderr_buffer, ""))
+            end
+            if on_close then
+                on_close(result.code)
+            end
         end)
+    end)
 
     --- Close the SSE connection
     function connection:close()
@@ -930,30 +929,30 @@ function M.start_server_for_cwd(callback)
                 end
             end,
         }, function(result)
-                -- Server process exited
-                vim.schedule(function()
-                    if callback_invoked then
-                        -- Callback already invoked (success or timeout), just clean up
-                        -- Unregister from registry
-                        unregister_server(cwd)
-                        config.state.servers[cwd] = nil
-                        return
-                    end
-                    if config.state.servers[cwd] and config.state.servers[cwd].starting then
-                        -- Failed to start
-                        callback_invoked = true
-                        config.state.servers[cwd] = nil
-                        local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
+            -- Server process exited
+            vim.schedule(function()
+                if callback_invoked then
+                    -- Callback already invoked (success or timeout), just clean up
+                    -- Unregister from registry
+                    unregister_server(cwd)
+                    config.state.servers[cwd] = nil
+                    return
+                end
+                if config.state.servers[cwd] and config.state.servers[cwd].starting then
+                    -- Failed to start
+                    callback_invoked = true
+                    config.state.servers[cwd] = nil
+                    local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
                         "Server exited unexpectedly"
-                        callback(false, error_msg)
-                    else
-                        -- Server stopped (expected or unexpected)
-                        -- Unregister from registry
-                        unregister_server(cwd)
-                        config.state.servers[cwd] = nil
-                    end
-                end)
+                    callback(false, error_msg)
+                else
+                    -- Server stopped (expected or unexpected)
+                    -- Unregister from registry
+                    unregister_server(cwd)
+                    config.state.servers[cwd] = nil
+                end
             end)
+        end)
 
         -- Store process reference immediately so we can track it
         if config.state.servers[cwd] then
