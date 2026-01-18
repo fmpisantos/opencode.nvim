@@ -700,23 +700,23 @@ function M.run_opencode(prompt, files, source_file)
                         vim.schedule(send_message)
                         return
                     end
-                    
+
                     -- *** FIX 1: Parse and update SSE state BEFORE filtering ***
                     -- This must happen before we check event_session_id so we can extract it
                     local changed = response.parse_sse_event(sse_state, event_type, event_data)
-                    
+
                     -- Filter events for our session
                     -- Now we can use sse_state.session_id if it was just set
                     local event_session_id = event_data and
-                        (event_data.sessionID or 
-                         (event_data.info and event_data.info.sessionID) or 
-                         (event_data.part and event_data.part.sessionID))
-                    
+                        (event_data.sessionID or
+                            (event_data.info and event_data.info.sessionID) or
+                            (event_data.part and event_data.part.sessionID))
+
                     -- Update our session tracking if we just learned it
                     if event_session_id and not our_session_id then
                         our_session_id = event_session_id
                     end
-                    
+
                     if event_session_id and our_session_id and event_session_id ~= our_session_id then
                         return -- Ignore events for other sessions
                     end

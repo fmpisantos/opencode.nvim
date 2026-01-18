@@ -287,6 +287,13 @@ function M.process_sse_event(state, event_type, event_data)
     return changed
 end
 
+--- Alias for process_sse_event for compatibility
+---@param state SSEState State to update
+---@param event_type string|nil Event type
+---@param event_data table|nil Event data
+---@return boolean changed Whether state changed
+M.parse_sse_event = M.process_sse_event
+
 --- Get response lines from SSE state
 ---@param state SSEState
 ---@return table response_lines Lines of response text
