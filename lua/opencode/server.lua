@@ -381,13 +381,19 @@ function M.stop_server_for_cwd()
     if server then
         -- Only kill process if we own it (not external)
         if server.process and not server.external then
-            pcall(function() server.process:kill(15) end) -- SIGTERM
-            -- Give it a moment, then force kill if needed
-            vim.defer_fn(function()
-                if server.process then
-                    pcall(function() server.process:kill(9) end) -- SIGKILL
-                end
-            end, 1000)
+            local pid = server.process.pid
+            if pid then
+                -- Kill child processes first (opencode spawns child processes)
+                vim.fn.system({ "pkill", "-15", "-P", tostring(pid) })
+                vim.fn.system({ "kill", "-15", tostring(pid) })
+                -- Give it a moment, then force kill if needed
+                -- Only capture pid for the deferred callback to avoid stale references
+                vim.defer_fn(function()
+                    -- Force kill children and parent using system calls
+                    vim.fn.system({ "pkill", "-9", "-P", tostring(pid) })
+                    vim.fn.system({ "kill", "-9", tostring(pid) })
+                end, 1000)
+            end
             -- Unregister from the global registry only if we own it
             unregister_server(cwd)
         end
@@ -397,17 +403,25 @@ function M.stop_server_for_cwd()
     return false
 end
 
---- Kill a process by PID using synchronous system call
+--- Kill a process and its children by PID using synchronous system call
 --- This is used during VimLeavePre to ensure the server is killed before Neovim exits
+--- The opencode CLI spawns child processes, so we need to kill the entire process tree
 ---@param pid number Process ID to kill
-local function kill_process_sync(pid)
-    -- Use synchronous vim.fn.system to ensure the kill completes before Neovim exits
-    -- First try SIGTERM for graceful shutdown
+local function kill_process_tree_sync(pid)
+    -- Use pkill to kill the process tree by parent PID
+    -- This handles the case where opencode (Node.js) spawns child processes
+    -- First try SIGTERM for graceful shutdown of all children
+    vim.fn.system({ "pkill", "-15", "-P", tostring(pid) })
     vim.fn.system({ "kill", "-15", tostring(pid) })
 
-    -- Give it a brief moment to terminate gracefully, then force kill
-    -- We use a small sleep in a synchronous shell command
-    vim.fn.system({ "sh", "-c", string.format("sleep 0.1; kill -0 %d 2>/dev/null && kill -9 %d 2>/dev/null", pid, pid) })
+    -- Give processes a brief moment to terminate gracefully, then force kill
+    vim.fn.system({
+        "sh", "-c",
+        string.format(
+            "sleep 0.2; pkill -9 -P %d 2>/dev/null; kill -9 %d 2>/dev/null",
+            pid, pid
+        )
+    })
 end
 
 --- Stop all servers (for cleanup)
@@ -432,11 +446,13 @@ function M.stop_all_servers(force)
     if count > 0 then
         for _, srv in ipairs(servers_to_stop) do
             if force then
-                -- Immediate SIGKILL (used during VimLeavePre for fast cleanup)
+                -- Immediate SIGKILL of process tree (used during VimLeavePre for fast cleanup)
+                -- Kill children first, then parent
+                vim.fn.system({ "pkill", "-9", "-P", tostring(srv.pid) })
                 vim.fn.system({ "kill", "-9", tostring(srv.pid) })
             else
                 -- Graceful shutdown: SIGTERM, then wait briefly, then SIGKILL if needed
-                kill_process_sync(srv.pid)
+                kill_process_tree_sync(srv.pid)
             end
             -- Unregister from the global registry
             unregister_server(srv.cwd)
