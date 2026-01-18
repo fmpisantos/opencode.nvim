@@ -858,4 +858,14 @@ function M.setup(opts)
     state.is_initialized = true
 end
 
+--- Export current cwd server port
+---@return number|nil port
+function M.GetCurrentServerPort()
+    local srv = server.get_server_for_cwd()
+    if srv then
+        return srv.port
+    end
+    return nil
+end
+
 return M

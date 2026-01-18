@@ -468,7 +468,7 @@ function M.start_server_for_cwd(callback)
 
         local captured_port = nil
         local stderr_lines = {}
-        local callback_invoked = false  -- Guard to prevent double callback invocation
+        local callback_invoked = false -- Guard to prevent double callback invocation
 
         -- Start the server process
         local process = vim.system(cmd, {
@@ -494,12 +494,12 @@ function M.start_server_for_cwd(callback)
                                 process = process,
                                 port = captured_port,
                                 url = url,
-                                cwd = cwd, -- Store cwd for consistency when running commands
+                                cwd = cwd,                                    -- Store cwd for consistency when running commands
                                 starting = false,
-                                agent = "build", -- Default agent
-                                model = config.state.selected_model, -- Sync model from global state
+                                agent = "build",                              -- Default agent
+                                model = config.state.selected_model,          -- Sync model from global state
                                 session_id = config.state.current_session_id, -- Sync session from global state
-                                external = false, -- We own this server
+                                external = false,                             -- We own this server
                             }
 
                             -- Register in the global registry
@@ -532,12 +532,12 @@ function M.start_server_for_cwd(callback)
                                 process = process,
                                 port = captured_port,
                                 url = url,
-                                cwd = cwd, -- Store cwd for consistency when running commands
+                                cwd = cwd,                                    -- Store cwd for consistency when running commands
                                 starting = false,
-                                agent = "build", -- Default agent
-                                model = config.state.selected_model, -- Sync model from global state
+                                agent = "build",                              -- Default agent
+                                model = config.state.selected_model,          -- Sync model from global state
                                 session_id = config.state.current_session_id, -- Sync session from global state
-                                external = false, -- We own this server
+                                external = false,                             -- We own this server
                             }
 
                             -- Register in the global registry
@@ -562,7 +562,8 @@ function M.start_server_for_cwd(callback)
                     -- Failed to start
                     callback_invoked = true
                     config.state.servers[cwd] = nil
-                    local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or "Server exited unexpectedly"
+                    local error_msg = #stderr_lines > 0 and table.concat(stderr_lines, "\n") or
+                    "Server exited unexpectedly"
                     callback(false, error_msg)
                 else
                     -- Server stopped (expected or unexpected)
@@ -630,6 +631,16 @@ function M.ensure_server_running(callback)
         -- No server found, start one
         M.start_server_for_cwd(callback)
     end)
+end
+
+--- Retrieve port number for current cwd's server
+--- @return number|nil port Port number or nil if no server
+function M.get_server_port()
+    local server = M.get_server_for_cwd()
+    if server and server.port then
+        return server.port
+    end
+    return nil
 end
 
 return M
