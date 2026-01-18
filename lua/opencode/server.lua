@@ -157,9 +157,17 @@ end
 ---@param agent string Agent name ("build" or "plan")
 ---@param callback? function Optional callback(success, error_message)
 function M.set_server_agent_via_api(server_url, agent, callback)
-    http_request(server_url, "PATCH", "/config", { default_agent = agent }, function(success, result)
+    local body = { default_agent = agent }
+    http_request(server_url, "PATCH", "/config", body, function(success, result)
         if callback then
             if success then
+                -- Check if the response contains the updated default_agent
+                if type(result) == "table" and result.default_agent then
+                    if result.default_agent ~= agent then
+                        callback(false, "Server did not update default_agent (got: " .. tostring(result.default_agent) .. ", expected: " .. agent .. ")")
+                        return
+                    end
+                end
                 callback(true, nil)
             else
                 callback(false, tostring(result))

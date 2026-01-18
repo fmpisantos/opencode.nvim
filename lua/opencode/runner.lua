@@ -411,7 +411,7 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Function to execute via CLI with --attach flag (agentic mode)
     -- Uses `opencode run --attach <url>` as per https://opencode.ai/docs/cli/#attach
-    -- Note: Agent is set via HTTP API (PATCH /config) instead of --agent flag
+    -- Note: Agent is set via HTTP API (PATCH /config) before execution
     ---@param server_url string Server URL to attach to
     local function execute_agentic(server_url)
         -- Get model to use
@@ -429,7 +429,6 @@ function M.run_opencode(prompt, files, source_file)
 
         -- Build command using --attach flag
         -- From docs: opencode run --attach http://localhost:4096 "message"
-        -- Note: --agent is NOT used here; agent is set via HTTP API (PATCH /config)
         local base_cmd = { "opencode", "run", "--attach", server_url, "--format", "json" }
 
         -- Add --model flag if a model is selected
