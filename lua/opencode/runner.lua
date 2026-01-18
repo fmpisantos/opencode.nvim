@@ -235,7 +235,7 @@ function M.run_opencode(prompt, files, source_file)
             end
 
             if err then
-                table.insert(display_lines, "**Error:** " .. err)
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                 utils.append_stderr_block(display_lines, stderr_output)
             elseif #response_lines > 0 then
                 vim.list_extend(display_lines, response_lines)
@@ -349,7 +349,7 @@ function M.run_opencode(prompt, files, source_file)
                     end
 
                     if err then
-                        table.insert(display_lines, "**Error:** " .. err)
+                        table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                         utils.append_stderr_block(display_lines, stderr_output)
                     elseif #response_lines == 0 then
                         if result.code ~= 0 then
@@ -533,7 +533,7 @@ function M.run_opencode(prompt, files, source_file)
             end
 
             if err then
-                table.insert(display_lines, "**Error:** " .. err)
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                 utils.append_stderr_block(display_lines, stderr_output)
             elseif #response_lines > 0 then
                 vim.list_extend(display_lines, response_lines)
@@ -652,7 +652,7 @@ function M.run_opencode(prompt, files, source_file)
                     end
 
                     if err then
-                        table.insert(display_lines, "**Error:** " .. err)
+                        table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                         utils.append_stderr_block(display_lines, stderr_output)
                     elseif #response_lines == 0 then
                         if result.code ~= 0 then
@@ -856,20 +856,20 @@ function M.run_opencode_command(command, args)
             table.insert(display_lines, "")
         end
 
-        if err then
-            table.insert(display_lines, "**Error:** " .. err)
-            utils.append_stderr_block(display_lines, stderr_output)
-        elseif #response_lines > 0 then
-            vim.list_extend(display_lines, response_lines)
-        elseif not is_running then
-            table.insert(display_lines, "No response received.")
-            utils.append_stderr_block(display_lines, stderr_output)
-        end
+            if err then
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
+                utils.append_stderr_block(display_lines, stderr_output)
+            elseif #response_lines > 0 then
+                vim.list_extend(display_lines, response_lines)
+            elseif not is_running then
+                table.insert(display_lines, "No response received.")
+                utils.append_stderr_block(display_lines, stderr_output)
+            end
 
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
 
-        -- Auto-scroll to bottom if window is valid
-        local wins = vim.fn.win_findbuf(buf)
+            -- Auto-scroll to bottom if window is valid
+            local wins = vim.fn.win_findbuf(buf)
         if #wins > 0 then
             local line_count = vim.api.nvim_buf_line_count(buf)
             pcall(vim.api.nvim_win_set_cursor, wins[1], { line_count, 0 })
@@ -969,7 +969,7 @@ function M.run_opencode_command(command, args)
             end
 
             if err then
-                table.insert(display_lines, "**Error:** " .. err)
+                table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                 utils.append_stderr_block(display_lines, stderr_output)
             elseif #response_lines == 0 then
                 if result.code ~= 0 then

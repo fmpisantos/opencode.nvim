@@ -86,7 +86,9 @@ function M.parse_streaming_response(json_lines)
                     is_thinking = false
                     current_tool = nil
                     local text = data.part.text or ""
-                    -- Split the text by newlines and add each line separately
+                    -- Split the text by newlines (handle both \n and \r\n) and add each line separately
+                    -- First normalize \r\n to \n, then split
+                    text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
                     local text_lines = vim.split(text, "\n", { plain = true })
                     for _, text_line in ipairs(text_lines) do
                         table.insert(response_lines, text_line)

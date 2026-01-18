@@ -158,6 +158,16 @@ end
 -- Display Utilities
 -- =============================================================================
 
+--- Sanitize a string to be used as a single line (removes/replaces newlines)
+---@param str string|nil String to sanitize
+---@return string Sanitized string safe for nvim_buf_set_lines
+function M.sanitize_line(str)
+    if not str then
+        return ""
+    end
+    return str:gsub("[\r\n]+", " ")
+end
+
 --- Append stderr output to display lines
 ---@param display_lines table Lines to append to
 ---@param stderr_output table Stderr lines
@@ -175,7 +185,7 @@ function M.append_stderr_block(display_lines, stderr_output, is_running)
     end
     table.insert(display_lines, "```")
     for _, line in ipairs(stderr_output) do
-        table.insert(display_lines, line)
+        table.insert(display_lines, M.sanitize_line(line))
     end
     table.insert(display_lines, "```")
 end
@@ -212,7 +222,8 @@ function M.format_todo_list(todos)
     for _, todo in ipairs(todos) do
         local icon = status_icons[todo.status] or "[ ]"
         local priority = priority_markers[todo.priority] or ""
-        local line = string.format("%s %s %s", icon, todo.content or "", priority)
+        local content = M.sanitize_line(todo.content)
+        local line = string.format("%s %s %s", icon, content, priority)
         table.insert(lines, line)
     end
 
