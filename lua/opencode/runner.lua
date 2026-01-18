@@ -635,6 +635,7 @@ function M.run_opencode(prompt, files, source_file)
             local idle_after_response = false
             local sse_connected = false
             local message_sent = false
+            local post_completed = false
 
             -- Function to send the message (called after SSE connects)
             local function send_message()
@@ -647,7 +648,9 @@ function M.run_opencode(prompt, files, source_file)
                     prompt,
                     { agent = agent, model = model_to_use },
                     function(success, error_msg)
-                        if not success then
+                        if success then
+                            post_completed = true
+                        else
                             vim.schedule(function()
                                 sse_state.error_message = "Failed to send message: " .. tostring(error_msg)
                                 finalize()
@@ -693,13 +696,15 @@ function M.run_opencode(prompt, files, source_file)
 
                     -- Track when we start receiving response content
                     if event_type == "message.part.updated" and event_data.part then
-                        if event_data.part.type == "text" or event_data.part.type == "tool" then
+                        local part_type = event_data.part.type
+                        if part_type == "text" or part_type == "tool" or part_type == "reasoning" or part_type == "thinking" then
                             response_started = true
                         end
                     end
 
                     -- Check for completion: session.idle after we've started receiving response or seen busy state
-                    if event_type == "session.idle" and (response_started or busy_seen) then
+                    -- Also allow completion if post_completed is true (server accepted request) but we missed the busy state
+                    if event_type == "session.idle" and (response_started or busy_seen or post_completed) then
                         idle_after_response = true
                         -- Small delay to ensure all parts are received
                         vim.defer_fn(function()
@@ -711,45 +716,7 @@ function M.run_opencode(prompt, files, source_file)
 
                     -- Check for session.status busy -> idle transition
                     if event_type == "session.status" and event_data.status then
-                        if event_data.status.type == "idle" and (response_started or busy_seen) then
-                            idle_after_response = true
-                            vim.defer_fn(function()
-                                if is_running and idle_after_response then
-                                    finalize()
-                                end
-                            end, 100)
-                        end
-                    end
-
-                    -- Check for error
-                    if sse_state.error_message then
-                        vim.schedule(function()
-                            finalize()
-                        end)
-                        return
-                    end
-
-                    -- Track when we start receiving response content
-                    if event_type == "message.part.updated" and event_data.part then
-                        if event_data.part.type == "text" or event_data.part.type == "tool" then
-                            response_started = true
-                        end
-                    end
-
-                    -- Check for completion: session.idle after we've started receiving response or seen busy state
-                    if event_type == "session.idle" and (response_started or busy_seen) then
-                        idle_after_response = true
-                        -- Small delay to ensure all parts are received
-                        vim.defer_fn(function()
-                            if is_running and idle_after_response then
-                                finalize()
-                            end
-                        end, 100)
-                    end
-
-                    -- Check for session.status busy -> idle transition
-                    if event_type == "session.status" and event_data.status then
-                        if event_data.status.type == "idle" and (response_started or busy_seen) then
+                        if event_data.status.type == "idle" and (response_started or busy_seen or post_completed) then
                             idle_after_response = true
                             vim.defer_fn(function()
                                 if is_running and idle_after_response then
