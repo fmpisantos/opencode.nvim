@@ -692,7 +692,6 @@ function M.run_opencode(prompt, files, source_file)
                 server_url,
                 -- on_event callback
                 function(event_type, event_data)
-                    vim.schedule(vim.print(vim.inspect({ event_type, event_data })))
                     if not is_running then return end
 
                     -- Handle server.connected event - now safe to send message
@@ -776,13 +775,11 @@ function M.run_opencode(prompt, files, source_file)
                 function(error_msg)
                     if is_running then
                         sse_state.error_message = error_msg
-                        vim.schedule(vim.print(" SSE Error: " .. tostring(error_msg)))
                         finalize()
                     end
                 end,
                 -- on_close callback
                 function(exit_code)
-                    vim.schedule(vim.print("SSE Connection closed with exit code: " .. tostring(exit_code)))
                     if is_running then
                         -- SSE connection closed unexpectedly
                         local response_lines = response.get_sse_response_lines(sse_state)
@@ -802,7 +799,6 @@ function M.run_opencode(prompt, files, source_file)
             -- This handles cases where the server may not send this event
             vim.defer_fn(function()
                 if is_running and not sse_connected then
-                    vim.schedule(vim.print("SSE did not connect within 2s, sending message anyway"))
                     vim.schedule(send_message)
                 end
             end, 2000)
