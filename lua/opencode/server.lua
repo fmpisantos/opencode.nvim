@@ -394,7 +394,13 @@ function M.connect_event_stream(server_url, on_event, on_error, on_close)
                     -- Try to parse as JSON
                     local ok, parsed = pcall(vim.json.decode, data_str)
                     if ok then
-                        event_data = parsed
+                        -- SSE events from opencode server wrap data in "properties" field
+                        -- Unwrap it for easier consumption by event handlers
+                        if type(parsed) == "table" and parsed.properties then
+                            event_data = parsed.properties
+                        else
+                            event_data = parsed
+                        end
                     else
                         event_data = data_str
                     end
