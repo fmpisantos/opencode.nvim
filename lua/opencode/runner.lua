@@ -4,7 +4,7 @@ local M = {}
 -- Runner Module
 -- =============================================================================
 -- OpenCode CLI execution for opencode.nvim
--- 
+--
 -- This module handles running opencode commands in two modes:
 -- - "quick" mode: Uses `opencode run` directly for one-shot queries
 -- - "agentic" mode: Starts a local server via `opencode serve` and uses
@@ -62,7 +62,7 @@ function M.run_opencode(prompt, files, source_file)
         agent = "plan"
         agent_changed_by_prompt = true
         prompt = prompt:gsub("#plan%s*", ""):gsub("%s*#plan", "")
-    -- #build in prompt explicitly sets build mode
+        -- #build in prompt explicitly sets build mode
     elseif prompt:match("#build") then
         agent = "build"
         agent_changed_by_prompt = true
@@ -202,7 +202,8 @@ function M.run_opencode(prompt, files, source_file)
             local spinner_char = config.SPINNER_FRAMES[spinner_idx]
             spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
 
-            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = response.parse_streaming_response(json_lines)
+            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = response
+                .parse_streaming_response(json_lines)
 
             -- Capture CLI session ID if we don't have one yet
             if new_cli_session_id and not state.current_session_id then
@@ -284,7 +285,9 @@ function M.run_opencode(prompt, files, source_file)
                 end
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
-                    table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
+                    table.insert(display_lines,
+                        "**Error:** Request timed out after " ..
+                        math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
                     utils.append_stderr_block(display_lines, stderr_output)
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                     -- Save session even on timeout (only if we have a session ID)
@@ -345,7 +348,8 @@ function M.run_opencode(prompt, files, source_file)
                     end
 
                     -- Final update
-                    local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(json_lines)
+                    local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(
+                        json_lines)
                     local display_lines = vim.deepcopy(full_header)
 
                     -- Ensure we have the CLI session ID for saving
@@ -434,7 +438,7 @@ function M.run_opencode(prompt, files, source_file)
         end
 
         -- Build header for this query (showing HTTP API mode)
-        local api_info = string.format("POST /session/:id/prompt_async [agent=%s]", agent)
+        local api_info = string.format("POST /session/%s/prompt_async [agent=%s]", session_to_use or ":id", agent)
         local header_lines = {
             "**Mode:** [agentic] → " .. server_url,
             "**API:** `" .. api_info .. "`",
@@ -471,7 +475,24 @@ function M.run_opencode(prompt, files, source_file)
                 return
             end
 
-            local display_lines = vim.deepcopy(full_header)
+            -- *** FIX 3: Rebuild header with current session ID ***
+            -- This ensures :id gets replaced with actual session_id once known
+            local current_session_display = state.current_session_id or session_to_use or ":id"
+            local api_info = string.format("POST /session/%s/prompt_async [agent=%s]", current_session_display, agent)
+            local header_lines_current = {
+                "**Mode:** [agentic] → " .. server_url,
+                "**API:** `" .. api_info .. "`",
+                "",
+                "**Query:**",
+            }
+            vim.list_extend(header_lines_current, vim.split(prompt, "\n", { plain = true }))
+            vim.list_extend(header_lines_current, { "", "---", "" })
+
+            -- If continuing, prepend separator and existing content
+            local full_header_current = vim.deepcopy(display_prefix)
+            vim.list_extend(full_header_current, header_lines_current)
+
+            local display_lines = vim.deepcopy(full_header_current)
             local model_info = model_to_use and (" [" .. config.get_model_display() .. "]") or ""
 
             -- Add spinner if running
@@ -483,6 +504,7 @@ function M.run_opencode(prompt, files, source_file)
                 state.current_session_id = sse_state.session_id
                 vim.b[buf].opencode_session_id = state.current_session_id
                 server.set_server_session(sse_state.session_id)
+                -- Note: Header will be updated on next display call with new session_id
             end
 
             if is_running then
@@ -499,9 +521,11 @@ function M.run_opencode(prompt, files, source_file)
                 elseif sse_state.current_tool then
                     local tool_status = sse_state.tool_status or "running"
                     if tool_status == "pending" or tool_status == "running" then
-                        status_text = "**Status:** Executing `" .. sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
+                        status_text = "**Status:** Executing `" ..
+                            sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
                     else
-                        status_text = "**Status:** Completed `" .. sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
+                        status_text = "**Status:** Completed `" ..
+                            sse_state.current_tool .. "`" .. elapsed .. " " .. spinner_char
                     end
                 else
                     status_text = "**Status:** Running" .. model_info .. elapsed .. " " .. spinner_char
@@ -576,7 +600,9 @@ function M.run_opencode(prompt, files, source_file)
                 cleanup()
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
-                    table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
+                    table.insert(display_lines,
+                        "**Error:** Request timed out after " ..
+                        math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
                     vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                     -- Save session even on timeout (only if we have a session ID)
                     if state.current_session_id then
@@ -666,6 +692,7 @@ function M.run_opencode(prompt, files, source_file)
                 server_url,
                 -- on_event callback
                 function(event_type, event_data)
+                    vim.schedule(vim.print(vim.inspect({ event_type, event_data })))
                     if not is_running then return end
 
                     -- Handle server.connected event - now safe to send message
@@ -674,10 +701,24 @@ function M.run_opencode(prompt, files, source_file)
                         vim.schedule(send_message)
                         return
                     end
-
+                    
+                    -- *** FIX 1: Parse and update SSE state BEFORE filtering ***
+                    -- This must happen before we check event_session_id so we can extract it
+                    local changed = response.parse_sse_event(sse_state, event_type, event_data)
+                    
                     -- Filter events for our session
-                    local event_session_id = event_data and (event_data.sessionID or (event_data.info and event_data.info.sessionID) or (event_data.part and event_data.part.sessionID))
-                    if event_session_id and event_session_id ~= our_session_id then
+                    -- Now we can use sse_state.session_id if it was just set
+                    local event_session_id = event_data and
+                        (event_data.sessionID or 
+                         (event_data.info and event_data.info.sessionID) or 
+                         (event_data.part and event_data.part.sessionID))
+                    
+                    -- Update our session tracking if we just learned it
+                    if event_session_id and not our_session_id then
+                        our_session_id = event_session_id
+                    end
+                    
+                    if event_session_id and our_session_id and event_session_id ~= our_session_id then
                         return -- Ignore events for other sessions
                     end
 
@@ -726,6 +767,7 @@ function M.run_opencode(prompt, files, source_file)
                         end
                     end
 
+                    -- *** FIX 2: Now 'changed' is properly defined and update is triggered ***
                     if changed then
                         vim.schedule(update_display)
                     end
@@ -734,11 +776,13 @@ function M.run_opencode(prompt, files, source_file)
                 function(error_msg)
                     if is_running then
                         sse_state.error_message = error_msg
+                        vim.schedule(vim.print(" SSE Error: " .. tostring(error_msg)))
                         finalize()
                     end
                 end,
                 -- on_close callback
                 function(exit_code)
+                    vim.schedule(vim.print("SSE Connection closed with exit code: " .. tostring(exit_code)))
                     if is_running then
                         -- SSE connection closed unexpectedly
                         local response_lines = response.get_sse_response_lines(sse_state)
@@ -746,7 +790,8 @@ function M.run_opencode(prompt, files, source_file)
                             -- We got some response, consider it complete
                             finalize()
                         else
-                            sse_state.error_message = "SSE connection closed unexpectedly (exit code: " .. tostring(exit_code) .. ")"
+                            sse_state.error_message = "SSE connection closed unexpectedly (exit code: " ..
+                                tostring(exit_code) .. ")"
                             finalize()
                         end
                     end
@@ -757,6 +802,7 @@ function M.run_opencode(prompt, files, source_file)
             -- This handles cases where the server may not send this event
             vim.defer_fn(function()
                 if is_running and not sse_connected then
+                    vim.schedule(vim.print("SSE did not connect within 2s, sending message anyway"))
                     vim.schedule(send_message)
                 end
             end, 2000)
@@ -796,7 +842,8 @@ function M.run_opencode(prompt, files, source_file)
                     -- Failed to get/create session
                     if vim.api.nvim_buf_is_valid(buf) then
                         local display_lines = vim.deepcopy(full_header)
-                        table.insert(display_lines, "**Error:** Failed to create session: " .. tostring(session_id_or_error))
+                        table.insert(display_lines,
+                            "**Error:** Failed to create session: " .. tostring(session_id_or_error))
                         vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                     end
                 end
@@ -914,7 +961,8 @@ function M.run_opencode_command(command, args)
         local spinner_char = config.SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
 
-        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = response.parse_streaming_response(json_lines)
+        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = response
+            .parse_streaming_response(json_lines)
 
         -- Capture CLI session ID if we don't have one yet
         if new_cli_session_id and not state.current_session_id then
@@ -991,7 +1039,9 @@ function M.run_opencode_command(command, args)
             end
             if vim.api.nvim_buf_is_valid(buf) then
                 local display_lines = vim.deepcopy(header_lines)
-                table.insert(display_lines, "**Error:** Request timed out after " .. math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
+                table.insert(display_lines,
+                    "**Error:** Request timed out after " ..
+                    math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
                 utils.append_stderr_block(display_lines, stderr_output)
                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                 if state.current_session_id then
