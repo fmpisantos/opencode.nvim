@@ -35,6 +35,25 @@ function M.run_opencode(prompt, files, source_file)
         return
     end
 
+    -- Set up the queue processor on first call
+    if not requests.process_queue_fn then
+        requests.set_queue_processor(M.run_opencode)
+    end
+
+    -- Check if we're already processing a request
+    if requests.is_response_busy() then
+        -- Queue this request instead of running it
+        local position = requests.enqueue_request(prompt, files, source_file)
+        vim.notify(
+            string.format("Request queued (position %d). Will run when current request completes.", position),
+            vim.log.levels.INFO
+        )
+        return
+    end
+
+    -- Mark as busy before starting
+    requests.set_busy(true)
+
     local state = config.state
 
     -- Extract CLI session id from prompt if present (for continuation)
@@ -283,6 +302,8 @@ function M.run_opencode(prompt, files, source_file)
                 if system_obj then
                     system_obj:kill(9)
                 end
+                -- Mark as no longer busy (will trigger queue processing)
+                requests.set_busy(false)
                 if vim.api.nvim_buf_is_valid(buf) then
                     local display_lines = vim.deepcopy(full_header)
                     table.insert(display_lines,
@@ -347,6 +368,9 @@ function M.run_opencode(prompt, files, source_file)
                         requests.unregister_request(request_id)
                     end
 
+                    -- Mark as no longer busy (will trigger queue processing)
+                    requests.set_busy(false)
+
                     -- Final update
                     local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(
                         json_lines)
@@ -392,6 +416,8 @@ function M.run_opencode(prompt, files, source_file)
                     vim.fn.timer_stop(update_timer)
                     update_timer = nil
                 end
+                -- Mark as no longer busy (will trigger queue processing)
+                requests.set_busy(false)
             end
             request_id = requests.register_request(system_obj, cleanup_fn)
 
@@ -438,15 +464,23 @@ function M.run_opencode(prompt, files, source_file)
         end
 
         -- Build header for this query (showing HTTP API mode)
-        local api_info = string.format("POST /session/%s/prompt_async [agent=%s]", session_to_use or ":id", agent)
-        local header_lines = {
-            "**Mode:** [agentic] → " .. server_url,
-            "**API:** `" .. api_info .. "`",
-            "",
-            "**Query:**",
-        }
-        vim.list_extend(header_lines, vim.split(prompt, "\n", { plain = true }))
-        vim.list_extend(header_lines, { "", "---", "" })
+        -- Helper function to build agentic header lines
+        local function build_agentic_header(session_display)
+            local api_info = string.format("POST /session/%s/prompt_async", session_display or ":id")
+            local model_display = model_to_use and config.get_model_display() or "default"
+            local lines = {
+                "**Mode:** [agentic] → " .. server_url,
+                "**Model:** " .. model_display .. " | **Agent:** " .. agent,
+                "**API:** `" .. api_info .. "`",
+                "",
+                "**Query:**",
+            }
+            vim.list_extend(lines, vim.split(prompt, "\n", { plain = true }))
+            vim.list_extend(lines, { "", "---", "" })
+            return lines
+        end
+
+        local header_lines = build_agentic_header(session_to_use)
 
         -- If continuing, prepend separator and existing content
         local display_prefix = {}
@@ -475,18 +509,10 @@ function M.run_opencode(prompt, files, source_file)
                 return
             end
 
-            -- *** FIX 3: Rebuild header with current session ID ***
+            -- Rebuild header with current session ID
             -- This ensures :id gets replaced with actual session_id once known
             local current_session_display = state.current_session_id or session_to_use or ":id"
-            local api_info = string.format("POST /session/%s/prompt_async [agent=%s]", current_session_display, agent)
-            local header_lines_current = {
-                "**Mode:** [agentic] → " .. server_url,
-                "**API:** `" .. api_info .. "`",
-                "",
-                "**Query:**",
-            }
-            vim.list_extend(header_lines_current, vim.split(prompt, "\n", { plain = true }))
-            vim.list_extend(header_lines_current, { "", "---", "" })
+            local header_lines_current = build_agentic_header(current_session_display)
 
             -- If continuing, prepend separator and existing content
             local full_header_current = vim.deepcopy(display_prefix)
@@ -593,13 +619,20 @@ function M.run_opencode(prompt, files, source_file)
                 requests.unregister_request(request_id)
                 request_id = nil
             end
+            -- Mark as no longer busy (will trigger queue processing)
+            requests.set_busy(false)
         end
 
         local function handle_timeout()
             vim.schedule(function()
                 cleanup()
                 if vim.api.nvim_buf_is_valid(buf) then
-                    local display_lines = vim.deepcopy(full_header)
+                    -- Rebuild header with current session ID for final display
+                    local current_session_display = state.current_session_id or session_to_use or ":id"
+                    local final_header = vim.deepcopy(display_prefix)
+                    vim.list_extend(final_header, build_agentic_header(current_session_display))
+
+                    local display_lines = vim.deepcopy(final_header)
                     table.insert(display_lines,
                         "**Error:** Request timed out after " ..
                         math.floor(state.user_config.timeout_ms / 1000) .. " seconds")
@@ -615,8 +648,13 @@ function M.run_opencode(prompt, files, source_file)
         local function finalize()
             cleanup()
 
+            -- Rebuild header with current session ID for final display
+            local current_session_display = state.current_session_id or session_to_use or ":id"
+            local final_header = vim.deepcopy(display_prefix)
+            vim.list_extend(final_header, build_agentic_header(current_session_display))
+
             -- Final update
-            local display_lines = vim.deepcopy(full_header)
+            local display_lines = vim.deepcopy(final_header)
 
             -- Add error or response
             if sse_state.error_message then
@@ -837,11 +875,15 @@ function M.run_opencode(prompt, files, source_file)
                 else
                     -- Failed to get/create session
                     if vim.api.nvim_buf_is_valid(buf) then
-                        local display_lines = vim.deepcopy(full_header)
+                        local error_header = vim.deepcopy(display_prefix)
+                        vim.list_extend(error_header, build_agentic_header(session_to_use))
+                        local display_lines = vim.deepcopy(error_header)
                         table.insert(display_lines,
                             "**Error:** Failed to create session: " .. tostring(session_id_or_error))
                         vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
                     end
+                    -- Mark as no longer busy (will trigger queue processing)
+                    requests.set_busy(false)
                 end
             end)
         end)
@@ -863,7 +905,8 @@ function M.run_opencode(prompt, files, source_file)
                 if success then
                     execute_agentic(url_or_error)
                 else
-                    -- Server failed to start
+                    -- Server failed to start - mark as no longer busy
+                    requests.set_busy(false)
                     if vim.api.nvim_buf_is_valid(buf) then
                         vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
                             "**Mode:** [agentic]",
@@ -895,6 +938,19 @@ end
 ---@param args? string Optional command arguments
 function M.run_opencode_command(command, args)
     local state = config.state
+
+    -- Check if we're already processing a request
+    if requests.is_response_busy() then
+        -- Slash commands don't support queueing - notify user to wait
+        vim.notify(
+            "A request is already in progress. Please wait for it to complete or cancel it first.",
+            vim.log.levels.WARN
+        )
+        return
+    end
+
+    -- Mark as busy before starting
+    requests.set_busy(true)
 
     -- Clear session for new command (session ID will be set when we get it from CLI)
     state.current_session_id = nil
@@ -1033,6 +1089,8 @@ function M.run_opencode_command(command, args)
             if system_obj then
                 system_obj:kill(9)
             end
+            -- Mark as no longer busy (will trigger queue processing)
+            requests.set_busy(false)
             if vim.api.nvim_buf_is_valid(buf) then
                 local display_lines = vim.deepcopy(header_lines)
                 table.insert(display_lines,
@@ -1095,6 +1153,9 @@ function M.run_opencode_command(command, args)
                 requests.unregister_request(request_id)
             end
 
+            -- Mark as no longer busy (will trigger queue processing)
+            requests.set_busy(false)
+
             -- Final update
             local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(json_lines)
             local display_lines = vim.deepcopy(header_lines)
@@ -1139,6 +1200,8 @@ function M.run_opencode_command(command, args)
             vim.fn.timer_stop(update_timer)
             update_timer = nil
         end
+        -- Mark as no longer busy (will trigger queue processing)
+        requests.set_busy(false)
     end
     request_id = requests.register_request(system_obj, cleanup_fn)
 
