@@ -835,9 +835,22 @@ function M.setup(opts)
     commands.setup(M, state.user_config)
     ui.setup_auto_reload()
 
-    -- Clean up active requests and servers when Vim exits
+    -- Clean up active requests, servers, and buffers when Vim exits
     vim.api.nvim_create_autocmd("VimLeavePre", {
         callback = function()
+            -- Clean up prompt buffer to prevent errors on exit
+            if state.prompt_buf and vim.api.nvim_buf_is_valid(state.prompt_buf) then
+                pcall(function() vim.bo[state.prompt_buf].modified = false end)
+                pcall(vim.api.nvim_buf_delete, state.prompt_buf, { force = true })
+                state.prompt_buf = nil
+            end
+            -- Also check by name in case state was lost
+            local prompt_buf = vim.fn.bufnr("opencode://prompt")
+            if prompt_buf ~= -1 and vim.api.nvim_buf_is_valid(prompt_buf) then
+                pcall(function() vim.bo[prompt_buf].modified = false end)
+                pcall(vim.api.nvim_buf_delete, prompt_buf, { force = true })
+            end
+
             local request_count = requests.cancel_all_requests()
             -- Use force=true for immediate cleanup since Vim is exiting
             local server_count = server.stop_all_servers(true)
