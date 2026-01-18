@@ -397,27 +397,22 @@ function M.stop_server_for_cwd()
     return false
 end
 
---- Spawn a detached process to kill a PID
---- This is used during VimLeavePre to ensure the server is killed even after Neovim exits
+--- Kill a process by PID using synchronous system call
+--- This is used during VimLeavePre to ensure the server is killed before Neovim exits
 ---@param pid number Process ID to kill
-local function spawn_detached_kill(pid)
-    -- Use sh -c to run kill in background, fully detached from Neovim
-    -- The process will continue running after Neovim exits
-    local handle, _ = vim.uv.spawn("sh", {
-        args = { "-c", string.format("kill -9 %d 2>/dev/null; exit 0", pid) },
-        detached = true,
-        hide = true,
-    }, function() end) -- Empty callback, we don't care about the result
+local function kill_process_sync(pid)
+    -- Use synchronous vim.fn.system to ensure the kill completes before Neovim exits
+    -- First try SIGTERM for graceful shutdown
+    vim.fn.system({ "kill", "-15", tostring(pid) })
 
-    if handle then
-        -- Unref so Neovim doesn't wait for this process
-        handle:unref()
-    end
+    -- Give it a brief moment to terminate gracefully, then force kill
+    -- We use a small sleep in a synchronous shell command
+    vim.fn.system({ "sh", "-c", string.format("sleep 0.1; kill -0 %d 2>/dev/null && kill -9 %d 2>/dev/null", pid, pid) })
 end
 
 --- Stop all servers (for cleanup)
 --- For external servers, only removes from local state (doesn't kill the process)
----@param force? boolean If true, use SIGKILL via detached process (default: false, use SIGTERM first)
+---@param force? boolean If true, skip graceful shutdown and use SIGKILL immediately (default: false)
 ---@return number count Number of servers stopped
 function M.stop_all_servers(force)
     local count = 0
@@ -435,28 +430,50 @@ function M.stop_all_servers(force)
     end
 
     if count > 0 then
-        if force then
-            -- Spawn detached kill processes - used during VimLeavePre
-            -- These will continue running after Neovim exits
-            for _, srv in ipairs(servers_to_stop) do
-                spawn_detached_kill(srv.pid)
-                -- Unregister from the global registry
-                unregister_server(srv.cwd)
+        for _, srv in ipairs(servers_to_stop) do
+            if force then
+                -- Immediate SIGKILL (used during VimLeavePre for fast cleanup)
+                vim.fn.system({ "kill", "-9", tostring(srv.pid) })
+            else
+                -- Graceful shutdown: SIGTERM, then wait briefly, then SIGKILL if needed
+                kill_process_sync(srv.pid)
             end
-        else
-            -- Graceful shutdown: SIGTERM first, then detached SIGKILL
-            for _, srv in ipairs(servers_to_stop) do
-                pcall(function() srv.process:kill(15) end) -- SIGTERM
-                -- Unregister from the global registry
-                unregister_server(srv.cwd)
-                -- Spawn detached SIGKILL as fallback (no-op if process already dead)
-                spawn_detached_kill(srv.pid)
-            end
+            -- Unregister from the global registry
+            unregister_server(srv.cwd)
         end
     end
 
     config.state.servers = {}
     return count
+end
+
+--- Check if a port is available (synchronous)
+---@param port number Port to check
+---@param hostname string Hostname to check
+---@return boolean available Whether the port is available
+local function is_port_available(port, hostname)
+    -- Try to connect to the port - if it fails, the port is available
+    vim.fn.system({
+        "curl", "-s", "-o", "/dev/null",
+        "--connect-timeout", "1",
+        string.format("http://%s:%d/", hostname, port)
+    })
+    -- If curl fails to connect (exit code non-zero or connection refused), port is available
+    return vim.v.shell_error ~= 0
+end
+
+--- Find the first available port from the configured list
+---@param ports table List of ports to try
+---@param hostname string Hostname to check
+---@return number port First available port, or 0 if none available
+local function find_available_port(ports, hostname)
+    for _, port in ipairs(ports) do
+        if is_port_available(port, hostname) then
+            return port
+        end
+    end
+    -- All predefined ports are in use, fall back to OS-assigned port
+    return 0
 end
 
 --- Start server for current cwd
@@ -515,9 +532,11 @@ function M.start_server_for_cwd(callback)
         -- Mark as starting
         config.state.servers[cwd] = { starting = true }
 
-        -- Build command
-        local port = user_config.server.port or 0
+        -- Find an available port from the configured list
         local hostname = user_config.server.hostname or "127.0.0.1"
+        local ports = user_config.server.ports or { 4096, 4097, 4098, 4099, 4100, 4101, 4102, 4103, 4104, 4105 }
+        local port = find_available_port(ports, hostname)
+
         local cmd = { "opencode", "serve", "--port", tostring(port), "--hostname", hostname }
 
         local captured_port = nil

@@ -53,7 +53,9 @@ M.defaults = {
     mode = "quick",
     -- Server settings for agentic mode
     server = {
-        port = 0, -- 0 = random available port
+        -- Ordered list of ports to try. The server will use the first available port.
+        -- If all ports are in use, falls back to port 0 (OS-assigned random port).
+        ports = { 4096, 4097, 4098, 4099, 4100, 4101, 4102, 4103, 4104, 4105 },
         hostname = "127.0.0.1",
     },
 }
