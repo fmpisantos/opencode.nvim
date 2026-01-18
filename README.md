@@ -23,9 +23,11 @@ A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, al
 - [opencode](https://opencode.ai) CLI tool installed and available in PATH
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) - For model selection and file references
 
-### Optional Dependencies
+### Recomended Dependencies
 
-- [shared_buffer.nvim](https://github.com/fmpisantos/shared_buffer.nvim) - Enhanced state persistence with file watching. If not installed, the plugin falls back to direct file-based persistence.
+- [shared_buffer.nvim](https://github.com/fmpisantos/shared_buffer.nvim) 
+    - Enhanced state persistence with file watching. If not installed, the plugin falls back to direct file-based persistence.
+    - Some features might not be supported without this dependency
 
 ## 📦 Installation
 

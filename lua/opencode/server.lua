@@ -179,12 +179,49 @@ end
 -- Server State Management
 -- =============================================================================
 
+--- Check if a registered server is still alive (synchronous)
+---@param entry table Registry entry { port, url, pid, nvim_pid, timestamp }
+---@return boolean alive Whether the server responds to health check
+local function check_server_health_sync(entry)
+    local result = vim.fn.system({
+        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+        "--connect-timeout", "1",
+        entry.url .. "/global/health"
+    })
+    return result and result:match("^200") ~= nil
+end
+
 --- Get server info for current cwd
 ---@return table|nil server { process, port, url, agent, model, session_id } or nil
 function M.get_server_for_cwd()
     local cwd = config.get_cwd()
     local server = config.state.servers[cwd]
+
+    -- If no server in memory, check the registry for external servers
     if not server then
+        local registry = load_registry()
+        local entry = registry[cwd]
+        if entry and entry.url then
+            -- Verify the server is still responding via synchronous health check
+            if check_server_health_sync(entry) then
+                -- Server is alive, add it to local state as external
+                config.state.servers[cwd] = {
+                    process = nil, -- We don't own this process
+                    port = entry.port,
+                    url = entry.url,
+                    cwd = cwd,
+                    starting = false,
+                    agent = "build", -- Default agent
+                    model = config.state.selected_model,
+                    session_id = config.state.current_session_id,
+                    external = true, -- Flag to indicate we didn't start this server
+                }
+                return config.state.servers[cwd]
+            else
+                -- Server is not responding, clean up the registry entry
+                unregister_server(cwd)
+            end
+        end
         return nil
     end
 
