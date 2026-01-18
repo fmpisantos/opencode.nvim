@@ -111,6 +111,19 @@ end
 -- HTTP API Functions
 -- =============================================================================
 
+--- URL encode a string
+---@param str string String to encode
+---@return string Encoded string
+local function url_encode(str)
+    if str then
+        str = string.gsub(str, "\n", "\r\n")
+        str = string.gsub(str, "([^%w %-%_%.%~])",
+            function(c) return string.format("%%%02X", string.byte(c)) end)
+        str = string.gsub(str, " ", "%%20")
+    end
+    return str
+end
+
 --- Make an HTTP request to the server
 ---@param server_url string Server base URL
 ---@param method string HTTP method (GET, POST, PATCH, etc.)
@@ -213,7 +226,7 @@ end
 ---@param server_url string Server base URL
 ---@param session_id string Session ID
 ---@param message string The message text
----@param opts? table Optional { agent?: string, model?: string }
+---@param opts? table Optional { agent?: string, model?: string, noReply?: boolean }
 ---@param callback function Called with (success, error_or_nil)
 function M.send_message_async(server_url, session_id, message, opts, callback)
     opts = opts or {}
@@ -228,6 +241,9 @@ function M.send_message_async(server_url, session_id, message, opts, callback)
     if opts.agent then
         body.agent = opts.agent
     end
+    if opts.noReply ~= nil then
+        body.noReply = opts.noReply
+    end
     if opts.model then
         local providerID, modelID = string.match(opts.model, "([^/]+)/([^/]+)")
         if providerID and modelID then
@@ -240,8 +256,9 @@ function M.send_message_async(server_url, session_id, message, opts, callback)
         end
     end
 
-    local path = "/session/" .. session_id .. "/prompt_async"
-    http_request(server_url, "POST", path, body, nil, function(success, result)
+    local cwd = config.get_cwd()
+    local path = "/session/" .. session_id .. "/prompt_async?directory=" .. url_encode(cwd)
+    http_request(server_url, "POST", path, body, function(success, result)
         if callback then
             callback(success, success and nil or tostring(result))
         end
