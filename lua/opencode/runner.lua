@@ -154,7 +154,11 @@ function M.run_opencode(prompt, files, source_file)
         local cmd = utils.build_opencode_cmd(base_cmd, prompt, all_files)
 
         -- Build header for this query
-        local cmd_display = table.concat(cmd, " "):gsub("\n", "\\n")
+        local cmd_parts_display = {}
+        for _, part in ipairs(cmd) do
+            table.insert(cmd_parts_display, vim.fn.shellescape(part))
+        end
+        local cmd_display = table.concat(cmd_parts_display, " "):gsub("\n", "\\n")
         local header_lines = {
             "**Mode:** [quick]",
             "**Command:** `" .. cmd_display .. "`",
@@ -857,7 +861,12 @@ function M.run_opencode_command(command, args)
     -- Build header
     local model_info = state.selected_model and (" [" .. config.get_model_display() .. "]") or ""
     local args_display = (args and args ~= "") and (" " .. args) or ""
-    local cmd_display = table.concat(cmd, " ")
+
+    local cmd_parts_display = {}
+    for _, part in ipairs(cmd) do
+        table.insert(cmd_parts_display, vim.fn.shellescape(part))
+    end
+    local cmd_display = table.concat(cmd_parts_display, " ")
     local header_lines = {
         "**Command:** `" .. cmd_display .. "`",
         "",

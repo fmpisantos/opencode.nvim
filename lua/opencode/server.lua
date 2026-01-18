@@ -144,7 +144,12 @@ local function http_request(server_url, method, path, body, callback)
 
     table.insert(cmd, url)
 
-    vim.print("Curl command:", table.concat(cmd, " "))
+    -- Construct a shell-safe command string for debugging
+    local debug_cmd = {}
+    for _, part in ipairs(cmd) do
+        table.insert(debug_cmd, vim.fn.shellescape(part))
+    end
+    vim.print("Curl command:", table.concat(debug_cmd, " "))
     vim.system(cmd, { text = true }, function(result)
         vim.schedule(function()
             if result.code ~= 0 then
