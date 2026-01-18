@@ -23,6 +23,10 @@ A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, al
 - [opencode](https://opencode.ai) CLI tool installed and available in PATH
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) - For model selection and file references
 
+### Optional Dependencies
+
+- [shared_buffer.nvim](https://github.com/fmpisantos/shared_buffer.nvim) - Enhanced state persistence with file watching. If not installed, the plugin falls back to direct file-based persistence.
+
 ## 📦 Installation
 
 ### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
@@ -35,6 +39,8 @@ A Neovim plugin that integrates the [opencode](https://opencode.ai) CLI tool, al
     "nvim-telescope/telescope-ui-select.nvim",
     "nvim-telescope/telescope-fzf-native.nvim",
     "nvim-lua/plenary.nvim",
+    -- Optional: enhanced state persistence with file watching
+    { "fmpisantos/shared_buffer.nvim", optional = true },
   },
   config = function()
     require("opencode").setup()
@@ -52,6 +58,8 @@ use {
     "nvim-telescope/telescope-ui-select.nvim",
     "nvim-telescope/telescope-fzf-native.nvim",
     "nvim-lua/plenary.nvim",
+    -- Optional: enhanced state persistence with file watching
+    { "fmpisantos/shared_buffer.nvim", opt = true },
   },
   config = function()
     require("opencode").setup()
@@ -69,6 +77,8 @@ return {
     "nvim-telescope/telescope-ui-select.nvim",
     "nvim-telescope/telescope-fzf-native.nvim",
     "nvim-lua/plenary.nvim",
+    -- Optional: enhanced state persistence with file watching
+    "fmpisantos/shared_buffer.nvim",
   },
   setup = function()
     require("opencode").setup()
@@ -387,8 +397,12 @@ When OpenCode creates a todo list to plan its work, the tasks are displayed dire
 
 1. **Prompt Processing**: Your prompts are sent to the opencode CLI with the selected model and agent mode
 2. **Streaming Display**: Responses stream in real-time to a vertical split buffer with markdown syntax highlighting
-3. **Persistent Settings**: Model selection and draft content are persisted to `~/.local/share/nvim/opencode/config.json`
-4. **Smart Integration**: The plugin integrates with your current buffer context, allowing seamless file references
+3. **Persistent Settings**: Model selection and project modes are persisted to `~/.local/share/nvim/`:
+   - With `shared_buffer.nvim`: Uses `shared_opencode_config_state.json` and `shared_opencode_projects_state.json` with file watching
+   - Without `shared_buffer.nvim`: Falls back to `opencode/config.json` and `opencode/projects.json`
+4. **Session Storage**: Conversations are stored in `/tmp/opencode-nvim-sessions/` (ephemeral)
+5. **Server Registry**: Cross-instance server coordination via `~/.local/share/nvim/opencode/servers.json`
+6. **Smart Integration**: The plugin integrates with your current buffer context, allowing seamless file references
 
 ## 🐛 Troubleshooting
 

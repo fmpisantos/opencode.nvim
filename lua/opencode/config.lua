@@ -4,6 +4,7 @@ local M = {}
 -- Configuration Module
 -- =============================================================================
 -- Centralized configuration and state management for opencode.nvim
+-- Uses shared_buffer.nvim for persistent state management
 
 -- =============================================================================
 -- Constants
@@ -58,15 +59,69 @@ M.defaults = {
 }
 
 -- =============================================================================
--- Paths
+-- Paths (only sessions_dir is still needed for temporary session files)
 -- =============================================================================
 
 M.paths = {
-    config_dir = vim.fn.stdpath("data") .. "/opencode",
-    config_file = vim.fn.stdpath("data") .. "/opencode/config.json",
-    project_config_file = vim.fn.stdpath("data") .. "/opencode/projects.json",
     sessions_dir = "/tmp/opencode-nvim-sessions",
 }
+
+-- =============================================================================
+-- Shared Buffer State Management
+-- =============================================================================
+
+-- Persistent state via shared_buffer.nvim (optional dependency)
+-- If shared_buffer is not available, falls back to direct file-based persistence
+local shared_buffer_ok, shared_buffer = pcall(require, "shared_buffer")
+
+local config_state, save_config_state
+local project_state, save_project_state
+
+if shared_buffer_ok then
+    -- Global config (model selection) - stored in ~/.local/share/nvim/shared_opencode_config_state.json
+    config_state, save_config_state = shared_buffer.setup("opencode_config")
+    -- Project modes - stored in ~/.local/share/nvim/shared_opencode_projects_state.json
+    project_state, save_project_state = shared_buffer.setup("opencode_projects")
+else
+    -- Fallback: direct file-based persistence
+    local config_file = vim.fn.stdpath("data") .. "/opencode/config.json"
+    local project_file = vim.fn.stdpath("data") .. "/opencode/projects.json"
+
+    -- Load config state from file
+    config_state = { bufnr = -1 }
+    if vim.fn.filereadable(config_file) == 1 then
+        local content = vim.fn.readfile(config_file)
+        if #content > 0 then
+            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
+            if ok and data then
+                config_state = data
+            end
+        end
+    end
+
+    -- Load project state from file
+    project_state = { bufnr = -1 }
+    if vim.fn.filereadable(project_file) == 1 then
+        local content = vim.fn.readfile(project_file)
+        if #content > 0 then
+            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
+            if ok and data then
+                project_state = data
+            end
+        end
+    end
+
+    -- Fallback save functions
+    save_config_state = function(state)
+        vim.fn.mkdir(vim.fn.fnamemodify(config_file, ":h"), "p")
+        vim.fn.writefile({ vim.json.encode(state) }, config_file)
+    end
+
+    save_project_state = function(state)
+        vim.fn.mkdir(vim.fn.fnamemodify(project_file, ":h"), "p")
+        vim.fn.writefile({ vim.json.encode(state) }, project_file)
+    end
+end
 
 -- =============================================================================
 -- State (mutable)
@@ -89,9 +144,12 @@ M.paths = {
 ---@field servers table
 ---@field project_modes table
 
-local shared_state = require("shared_buffer")
 M.state = {
-    selected_model = nil,
+    -- Persistent state (loaded from shared_buffer or fallback on startup)
+    selected_model = config_state.model,
+    project_modes = project_state.project_modes or {},
+
+    -- Runtime-only state
     draft_content = nil,
     draft_cursor = nil,
     user_config = vim.deepcopy(M.defaults),
@@ -114,53 +172,22 @@ M.state = {
     -- Server management state (for agentic mode)
     -- Keyed by cwd: { [cwd] = { process = system_obj, port = number, url = string, starting = bool } }
     servers = {},
-
-    -- Per-project mode preferences (loaded from disk)
-    project_modes = {}, -- { [cwd] = "quick" | "agentic" }
 }
 
 -- =============================================================================
--- Config File Management
+-- Config Persistence (via shared_buffer)
 -- =============================================================================
 
---- Load model configuration from disk
-function M.load_config()
-    if vim.fn.filereadable(M.paths.config_file) == 1 then
-        local content = vim.fn.readfile(M.paths.config_file)
-        if #content > 0 then
-            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
-            if ok and data and data.model then
-                M.state.selected_model = data.model
-            end
-        end
-    end
-end
-
---- Save model configuration to disk
+--- Save model configuration to shared_buffer
 function M.save_config()
-    vim.fn.mkdir(M.paths.config_dir, "p")
-    local data = { model = M.state.selected_model }
-    vim.fn.writefile({ vim.json.encode(data) }, M.paths.config_file)
+    config_state.model = M.state.selected_model
+    save_config_state(config_state)
 end
 
---- Load project modes from disk
-function M.load_project_modes()
-    if vim.fn.filereadable(M.paths.project_config_file) == 1 then
-        local content = vim.fn.readfile(M.paths.project_config_file)
-        if #content > 0 then
-            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
-            if ok and data and data.project_modes then
-                M.state.project_modes = data.project_modes
-            end
-        end
-    end
-end
-
---- Save project modes to disk
+--- Save project modes to shared_buffer
 function M.save_project_modes()
-    vim.fn.mkdir(M.paths.config_dir, "p")
-    local data = { project_modes = M.state.project_modes }
-    vim.fn.writefile({ vim.json.encode(data) }, M.paths.project_config_file)
+    project_state.project_modes = M.state.project_modes
+    save_project_state(project_state)
 end
 
 -- =============================================================================
@@ -233,9 +260,8 @@ function M.setup(opts)
         M.state.user_config = vim.tbl_deep_extend("force", M.defaults, opts)
     end
 
-    -- Load persisted configurations
-    M.load_config()
-    M.load_project_modes()
+    -- State is already loaded from shared_buffer at module load time
+    -- No need to call load_config() or load_project_modes()
 end
 
 return M

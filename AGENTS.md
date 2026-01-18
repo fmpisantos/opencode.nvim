@@ -8,47 +8,47 @@ opencode.nvim is a Neovim plugin integrating the [opencode](https://opencode.ai)
 
 ```
 opencode.nvim/
-├── ftdetect/opencode.lua     # Filetype detection
-├── ftplugin/opencode.lua     # Filetype-specific features
+├── ftdetect/opencode.lua     # Filetype detection (must be at root)
+├── ftplugin/opencode.lua     # Filetype-specific settings
 └── lua/opencode/
-    ├── init.lua              # Main entry point, prompt/review windows
-    ├── config.lua            # Configuration, state, constants
-    ├── commands.lua          # User commands and keymaps
-    ├── ui.lua                # UI components (Spinner, windows, buffers)
-    ├── utils.lua             # Shared utilities
-    ├── session.lua           # Session management
-    ├── server.lua            # Server management (agentic mode)
-    ├── runner.lua            # Command execution
-    ├── requests.lua          # Request tracking
-    └── response.lua          # Response handling
+    ├── init.lua              # Main entry, prompt/review windows, setup()
+    ├── config.lua            # Configuration, state, constants, paths
+    ├── commands.lua          # User commands (:OpenCode, :OCModel, etc.)
+    ├── ui.lua                # Spinner class, floating windows, response buffer
+    ├── utils.lua             # File utilities, string parsing, command building
+    ├── session.lua           # Session persistence and management
+    ├── server.lua            # Server lifecycle (agentic mode)
+    ├── runner.lua            # Command execution via vim.system()
+    ├── requests.lua          # Active request tracking and cancellation
+    └── response.lua          # Response parsing and display
 ```
-
-**Important**: `ftdetect/` and `ftplugin/` MUST be at the root level for Neovim to auto-load them.
 
 ## Build, Test, and Lint Commands
 
-### Testing
-- **No formal test suite exists** - manual testing required
-- Test in Neovim: `:OpenCode`, `:OpenCodeModel`, `:OpenCodeReview`
-- Test visual selection: Select text, then `<leader>oc`
-
-### Development Workflow
+### Testing (Manual)
+No formal test suite exists. Test manually in Neovim:
 ```vim
-" Reload plugin during development
+:OpenCode              " Open prompt window
+:OpenCodeModel         " Select AI model
+:OpenCodeReview        " Git review
+:OCMode agentic        " Switch modes
+```
+
+### Development Reload
+```vim
 :lua package.loaded['opencode'] = nil
 :lua package.loaded['opencode.config'] = nil
 :lua require('opencode').setup()
 ```
 
 ### Linting
-- No configured linters - follows manual code style
-- Consider: `.luacheckrc` for luacheck or `stylua.toml` for stylua
+No configured linters. Follow existing code style manually.
 
 ## Code Style Guidelines
 
 ### File Organization
-- Section separators: `-- =========...`
-- Order: Constants -> State -> Helper Functions -> Main Logic -> Setup
+- Section separators: `-- =========...` (80+ chars)
+- Order: Constants -> State -> Helper Functions -> Main Logic -> Setup/Return
 
 ### Naming Conventions
 | Type | Convention | Example |
@@ -61,11 +61,14 @@ opencode.nvim/
 
 ### Imports
 ```lua
--- External deps inside functions where needed
-local pickers = require("telescope.pickers")
-
--- Module imports at top of file
+-- Internal modules at top of file
 local config = require("opencode.config")
+local utils = require("opencode.utils")
+
+-- External deps inside functions (lazy loading)
+local function some_function()
+    local pickers = require("telescope.pickers")
+end
 ```
 
 ### Type Annotations (LuaLS/EmmyLua)
@@ -97,10 +100,10 @@ vim.notify("Error message", vim.log.levels.ERROR)
 
 ### Async Patterns
 ```lua
--- Use vim.system() for non-blocking commands
+-- Non-blocking commands with vim.system()
 vim.system({ "opencode", "models" }, { text = true }, function(result)
     vim.schedule(function()
-        -- UI updates MUST be in vim.schedule()
+        -- UI updates MUST be wrapped in vim.schedule()
     end)
 end)
 
@@ -113,20 +116,15 @@ vim.fn.timer_start(interval_ms, callback)
 -- Create scratch buffers
 local buf = vim.api.nvim_create_buf(false, true)
 
--- Set options via vim.bo/vim.wo (not nvim_buf_set_option)
+-- Set options via vim.bo/vim.wo (NOT nvim_buf_set_option)
 vim.bo[buf].buftype = "nofile"
 vim.bo[buf].filetype = "markdown"
 
 -- Buffer-local state
 vim.b[buf].opencode_session_id = session_id
-```
 
-### Strings and Tables
-```lua
-vim.split(text, "\n", { plain = true })  -- Split strings
-table.concat(lines, "\n")                 -- Join arrays
-vim.trim(str)                             -- Trim whitespace
-vim.iter(table):filter(fn):totable()      -- Functional iteration (0.10+)
+-- URI scheme for buffer names (avoids file path conflicts)
+vim.api.nvim_buf_set_name(buf, "opencode://prompt")
 ```
 
 ### Commands and Keymaps
@@ -135,16 +133,15 @@ vim.api.nvim_create_user_command("OpenCode", function() ... end, { nargs = 0 })
 vim.keymap.set("n", "<leader>oc", "<Cmd>OpenCode<CR>", { buffer = buf, silent = true })
 ```
 
-## Key Patterns in This Codebase
+## Key Patterns
 
 ### State Management
-- Global state in `config.state` table
-- Per-buffer state via `vim.b[buf].variable`
-- Persistent config in `~/.local/share/nvim/opencode/`
+- Global state: `config.state` table (selected_model, response_buf, servers, etc.)
+- Per-buffer state: `vim.b[buf].variable`
+- Persistent config: `~/.local/share/nvim/opencode/config.json`
 
-### Window Title Updates
+### Window Title Updates (Floating Windows Only)
 ```lua
--- Only update floating windows (check relative field)
 local win_config = vim.api.nvim_win_get_config(win)
 if win_config.relative and win_config.relative ~= "" then
     vim.api.nvim_win_set_config(win, { title = new_title })
@@ -159,16 +156,17 @@ vim.api.nvim_create_autocmd("TextChanged", { group = augroup, buffer = buf, call
 
 ## External Dependencies
 
-- **Neovim**: 0.9+ required (0.10+ recommended for `vim.iter`)
-- **telescope.nvim**: Required for model selection and file picking
+- **Neovim**: 0.9+ required (0.10+ for `vim.iter`)
+- **telescope.nvim**: Required for model/file selection
 - **opencode CLI**: Must be in PATH
 
 ## Common Pitfalls
 
 1. **Async UI updates**: Always wrap in `vim.schedule()` from callbacks
 2. **Handle validation**: Check buffer/window validity before operations
-3. **Buffer naming**: Use URI scheme (`opencode://prompt`) to avoid file path conflicts
+3. **Buffer naming**: Use URI scheme (`opencode://prompt`) to avoid conflicts
 4. **Mode transitions**: Use `vim.api.nvim_feedkeys()` with correct flags
+5. **ftdetect/ftplugin**: Must remain at repository root for Neovim auto-loading
 
 ## Git Commit Style
 
@@ -181,7 +179,7 @@ docs: Documentation changes
 
 ## Contributing Checklist
 
-- [ ] Follow existing code style and section organization
+- [ ] Follow existing code style and section separators
 - [ ] Add LuaLS annotations for public functions
 - [ ] Validate buffer/window handles before operations
 - [ ] Use `vim.schedule()` for async UI updates
