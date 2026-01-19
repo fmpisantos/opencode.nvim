@@ -203,7 +203,7 @@ end
 ---@param session_id? string Session ID to display (if provided, session info will be shown)
 ---@return string title
 function M.get_window_title(content, session_id)
-    local agent_mode = "build"
+    local agent_mode = config.state.current_agent or "build"
     local project_mode = config.get_project_mode()
     
     if content then

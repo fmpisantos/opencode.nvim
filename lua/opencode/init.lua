@@ -264,7 +264,7 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
 
         -- Handle bare keywords for agent selection and mode switching iteratively
         -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
-        local processed_agent = nil
+        local processed_agent = config.state.current_agent or "build"
         local processed_mode = nil
         local remaining_content = content
         local found_keyword = true
@@ -275,10 +275,12 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             -- Check for Agent keywords
             if remaining_content:match("^plan%s") or remaining_content:match("^plan$") then
                 processed_agent = "#plan"
+config.state.current_agent = "plan"
                 remaining_content = remaining_content:gsub("^plan%s*", "")
                 found_keyword = true
             elseif remaining_content:match("^build%s") or remaining_content:match("^build$") then
                 processed_agent = "#build"
+config.state.current_agent = "build"
                 remaining_content = remaining_content:gsub("^build%s*", "")
                 found_keyword = true
             end

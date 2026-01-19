@@ -33,6 +33,8 @@ function M.save_session(session_id, content)
     local project_dir = M.get_project_session_dir()
     vim.fn.mkdir(project_dir, "p")
     local filepath = M.get_session_file(session_id)
+    -- Prepend agent information to the session content
+    content = "#agent(" .. (config.state.current_agent or "build") .. ")\n" .. content
     vim.fn.writefile(vim.split(content, "\n", { plain = true }), filepath)
 end
 
@@ -43,7 +45,12 @@ function M.load_session(session_id)
     local filepath = M.get_session_file(session_id)
     if vim.fn.filereadable(filepath) == 1 then
         local content = vim.fn.readfile(filepath)
-        return table.concat(content, "\n")
+        local first_line = content[1] or ""
+    if first_line:match("#agent%((.+)%)") then
+        config.state.current_agent = first_line:match("#agent%((.+)%)")
+        table.remove(content, 1)
+    end
+    return table.concat(content, "\n")
     end
     return nil
 end
@@ -115,6 +122,7 @@ function M.get_session_from_current_buffer()
     local current_buf = vim.api.nvim_get_current_buf()
     local state = config.state
     if current_buf == state.response_buf and state.response_buf and vim.api.nvim_buf_is_valid(state.response_buf) then
+        config.state.current_agent = config.state.current_agent or "build"
         return vim.b[state.response_buf].opencode_session_id
     end
     return nil

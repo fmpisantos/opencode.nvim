@@ -6,3 +6,6 @@
 - [ ] Closing nvim and calling :OCStop should actually kill every opencode serve that was launched
 - [ ] Make sure that the number of ports that can be used for opencode serve actually is something that makes sense
 - [ ] Add config input for custom ports to be used in the opencode serve
+- [ ] Make sure that when expanding on a session we keep the already predefined agent that was being used in that session. This means that if the last prompt had plan agent the next prompt by default will be a plan prompt, only if the user wrote #build would this change to build mode
+    - [ ] This should affect the display on the floating prompt window as well
+- [ ] If treesitter is installed than when opencode is changing code in the current openfile it should use treesitter to display what he is thinking to produce the code that it is producing. At least a loader for implementing changes around the place where it is actually changing should appear.
