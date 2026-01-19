@@ -262,7 +262,61 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         -- Remove bare #session triggers (but keep #session(<id>))
         content = content:gsub("#session%s*$", ""):gsub("#session([%s\n])", "%1")
 
-        -- Handle #agentic and #quick mode switches
+        -- Handle bare keywords for agent selection and mode switching iteratively
+        -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
+        local processed_agent = nil
+        local processed_mode = nil
+        local remaining_content = content
+        local found_keyword = true
+
+        while found_keyword do
+            found_keyword = false
+            
+            -- Check for Agent keywords
+            if remaining_content:match("^plan%s") or remaining_content:match("^plan$") then
+                processed_agent = "#plan"
+                remaining_content = remaining_content:gsub("^plan%s*", "")
+                found_keyword = true
+            elseif remaining_content:match("^build%s") or remaining_content:match("^build$") then
+                processed_agent = "#build"
+                remaining_content = remaining_content:gsub("^build%s*", "")
+                found_keyword = true
+            end
+
+            -- Check for Mode keywords (if we didn't just match an agent, or try again)
+            -- We check these independently in the same loop iteration to handle ordering
+            if not found_keyword then
+                if remaining_content:match("^agentic%s") or remaining_content:match("^agentic$") then
+                    processed_mode = "agentic"
+                    remaining_content = remaining_content:gsub("^agentic%s*", "")
+                    found_keyword = true
+                elseif remaining_content:match("^quick%s") or remaining_content:match("^quick$") then
+                    processed_mode = "quick"
+                    remaining_content = remaining_content:gsub("^quick%s*", "")
+                    found_keyword = true
+                end
+            end
+        end
+
+        content = remaining_content
+
+        -- Apply detected mode
+        if processed_mode then
+            config.set_project_mode(processed_mode)
+            vim.notify("Switched to " .. processed_mode .. " mode", vim.log.levels.INFO)
+        end
+
+        -- Apply detected agent by prepending the tag
+        if processed_agent then
+            -- Prepend to content so runner picks it up
+            if content == "" then
+                content = processed_agent
+            else
+                content = processed_agent .. " " .. content
+            end
+        end
+
+        -- Handle #agentic and #quick mode switches (legacy/explicit tags anywhere in string)
         if content:match("#agentic") then
             config.set_project_mode("agentic")
             content = content:gsub("#agentic%s*", ""):gsub("%s*#agentic", "")

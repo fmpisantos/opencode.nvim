@@ -203,16 +203,44 @@ end
 ---@param session_id? string Session ID to display (if provided, session info will be shown)
 ---@return string title
 function M.get_window_title(content, session_id)
-    local agent_mode = (content and content:match("#plan")) and "plan" or "build"
-    -- Check for #agentic or #quick in content to show pending mode change
+    local agent_mode = "build"
     local project_mode = config.get_project_mode()
+    
     if content then
-        if content:match("#agentic") then
-            project_mode = "agentic"
-        elseif content:match("#quick") then
-            project_mode = "quick"
+        -- Check for explicit tags first
+        if content:match("#plan") then agent_mode = "plan" end
+        if content:match("#agentic") then project_mode = "agentic" end
+        if content:match("#quick") then project_mode = "quick" end
+
+        -- Simulate the iterative parsing of bare keywords to update the preview title correctly
+        local temp_content = content
+        local found = true
+        while found do
+            found = false
+            if temp_content:match("^plan%s") or temp_content:match("^plan$") then
+                agent_mode = "plan"
+                temp_content = temp_content:gsub("^plan%s*", "")
+                found = true
+            elseif temp_content:match("^build%s") or temp_content:match("^build$") then
+                agent_mode = "build"
+                temp_content = temp_content:gsub("^build%s*", "")
+                found = true
+            end
+            
+            if not found then
+                if temp_content:match("^agentic%s") or temp_content:match("^agentic$") then
+                    project_mode = "agentic"
+                    temp_content = temp_content:gsub("^agentic%s*", "")
+                    found = true
+                elseif temp_content:match("^quick%s") or temp_content:match("^quick$") then
+                    project_mode = "quick"
+                    temp_content = temp_content:gsub("^quick%s*", "")
+                    found = true
+                end
+            end
         end
     end
+
     local title = " OpenCode [" .. agent_mode .. "] [" .. project_mode .. "] [" .. config.get_model_display() .. "]"
     if session_id then
         -- Use the passed session_id to display session info
