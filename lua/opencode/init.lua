@@ -373,6 +373,8 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
     -- Keymap to attach floating window to a regular window
     vim.keymap.set({ "n", "i" }, "<C-x><C-e>", attach_to_window,
         { buffer = buf, noremap = true, silent = true, desc = "Attach prompt to window" })
+    vim.keymap.set({ "n", "i" }, "<C-x>e", attach_to_window,
+        { buffer = buf, noremap = true, silent = true, desc = "Attach prompt to window" })
 end
 
 -- =============================================================================

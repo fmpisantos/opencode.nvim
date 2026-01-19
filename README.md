@@ -194,6 +194,7 @@ Inside the OpenCode prompt window:
 | `q` or `<Esc>` | Close without submitting (saves draft) |
 | `@` | Trigger Telescope file picker to insert file reference |
 | `<C-x><C-e>` | Attach the floating prompt to a regular split window |
+| `<C-x>e` | Attach the floating prompt to a regular split window |
 
 ### Special Markers (`#` Commands)
 
@@ -291,11 +292,29 @@ OpenCode supports two execution modes that determine how requests are processed:
 - Lower latency for simple requests
 - Each request is independent
 
-### Agentic Mode
-- Uses a persistent opencode server for request handling
-- Best for complex, multi-step tasks that benefit from context
-- Server starts automatically when needed (or manually with `:OCServerStart`)
-- Maintains state across requests within the same server session
+### Agentic Mode with HTTP Requests and SSE
+
+In agentic mode, the plugin operates a persistent server to handle complex, multi-step interactions. This server communicates with the OpenCode plugin through HTTP requests and Server-Sent Events (SSE) to enable real-time, bidirectional communication. 
+
+#### How Agentic Mode Works:
+- **opencode serve**: The Opencode CLI launches an HTTP server to process requests and send streaming responses.
+- **HTTP Requests**: All plugin queries (e.g., prompts, code reviews) are sent as HTTP requests to the server.
+- **Server-Sent Events (SSE)**: The server streams response data to the plugin in real-time, which is displayed dynamically in the response buffer.
+
+#### Starting the Server:
+- **Automatic Start**: The server starts automatically when agentic mode is enabled. No manual intervention is needed in most cases.
+- **Manual Start**: You can manually start the server from the command line:
+  ```bash
+  opencode serve
+  ```
+  When started, the server listens on a default or user-specified port (usually 8080).
+
+#### Server Management Commands:
+The following Vim commands allow you to manage the persistent server while in agentic mode:
+- `:OCServerStatus`: Check if the server is running and view its status.
+- `:OCServerStart`: Start the server manually.
+- `:OCServerStop`: Stop the server.
+- `:OCServerRestart`: Restart the server.
 
 ### Switching Modes
 
