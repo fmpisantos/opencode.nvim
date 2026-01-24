@@ -154,6 +154,68 @@ function M.extract_session_from_prompt(prompt)
     return prompt, session_id
 end
 
+--- Parse mode and agent keywords from the start of the content
+---@param content string
+---@return string content_without_keywords
+---@return string|nil mode "agentic" or "quick"
+---@return string|nil agent "plan" or "build"
+function M.parse_mode_agent_keywords(content)
+    local remaining_content = content
+    local found_keyword = true
+    local mode = nil
+    local agent = nil
+
+    while found_keyword do
+        found_keyword = false
+        
+        -- Check for Agent keywords
+        if remaining_content:match("^plan%s") or remaining_content:match("^plan$") then
+            agent = "plan"
+            remaining_content = remaining_content:gsub("^plan%s*", "")
+            found_keyword = true
+        elseif remaining_content:match("^build%s") or remaining_content:match("^build$") then
+            agent = "build"
+            remaining_content = remaining_content:gsub("^build%s*", "")
+            found_keyword = true
+        end
+
+        -- Check for Mode keywords (if we didn't just match an agent, or try again)
+        -- We check these independently in the same loop iteration to handle ordering
+        if not found_keyword then
+            if remaining_content:match("^agentic%s") or remaining_content:match("^agentic$") then
+                mode = "agentic"
+                remaining_content = remaining_content:gsub("^agentic%s*", "")
+                found_keyword = true
+            elseif remaining_content:match("^quick%s") or remaining_content:match("^quick$") then
+                mode = "quick"
+                remaining_content = remaining_content:gsub("^quick%s*", "")
+                found_keyword = true
+            end
+        end
+    end
+
+    -- Also handle legacy/tag syntax anywhere in string (#agentic, #quick)
+    -- These override prefix keywords if present
+    if remaining_content:match("#agentic") then
+        mode = "agentic"
+        remaining_content = remaining_content:gsub("#agentic%s*", ""):gsub("%s*#agentic", "")
+    elseif remaining_content:match("#quick") then
+        mode = "quick"
+        remaining_content = remaining_content:gsub("#quick%s*", ""):gsub("%s*#quick", "")
+    end
+    
+    -- Also handle #plan/#build tags anywhere
+    if remaining_content:match("#plan") then
+        agent = "plan"
+        remaining_content = remaining_content:gsub("#plan%s*", ""):gsub("%s*#plan", "")
+    elseif remaining_content:match("#build") then
+        agent = "build"
+        remaining_content = remaining_content:gsub("#build%s*", ""):gsub("%s*#build", "")
+    end
+
+    return remaining_content, mode, agent
+end
+
 -- =============================================================================
 -- Display Utilities
 -- =============================================================================

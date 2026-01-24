@@ -37,6 +37,18 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
     local from_response_session = session.get_session_from_current_buffer()
     local session_to_use = session_id_to_continue or from_response_session
 
+    -- Load session settings immediately if we have a session
+    -- This ensures the prompt window title and state are correct from the start
+    if session_to_use then
+        local settings = session.get_session_settings(session_to_use)
+        if settings.mode then
+            config.state.mode = settings.mode
+        end
+        if settings.agent then
+            config.state.current_agent = settings.agent
+        end
+    end
+
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
 
     -- Clear session state (we'll use #session(<id>) in the prompt instead)
@@ -264,78 +276,61 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
 
         -- Check for session ID and load its settings
         local session_in_prompt = content:match("#session%(([^)]+)%)")
+        local session_settings = {}
         if session_in_prompt then
-            local settings = session.get_session_settings(session_in_prompt)
-            -- Apply session settings or fall back to defaults
-            config.state.mode = settings.mode or config.state.user_config.mode or "quick"
-            config.state.current_agent = settings.agent or "build"
+            session_settings = session.get_session_settings(session_in_prompt)
         end
 
-        -- Handle bare keywords for agent selection and mode switching iteratively
+        -- Determine base mode and agent from session or current state
+        -- Priority: Session Settings > Current State > Defaults
+        local final_mode = session_settings.mode or config.get_project_mode()
+        local final_agent = session_settings.agent or config.state.current_agent or "build"
+
+        -- Handle keywords for agent selection and mode switching iteratively
         -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
-        local processed_agent = config.state.current_agent or "build"
-        local processed_mode = nil
-        local remaining_content = content
-        local found_keyword = true
-
-        while found_keyword do
-            found_keyword = false
-            
-            -- Check for Agent keywords
-            if remaining_content:match("^plan%s") or remaining_content:match("^plan$") then
-                processed_agent = "#plan"
-config.state.current_agent = "plan"
-                remaining_content = remaining_content:gsub("^plan%s*", "")
-                found_keyword = true
-            elseif remaining_content:match("^build%s") or remaining_content:match("^build$") then
-                processed_agent = "#build"
-config.state.current_agent = "build"
-                remaining_content = remaining_content:gsub("^build%s*", "")
-                found_keyword = true
-            end
-
-            -- Check for Mode keywords (if we didn't just match an agent, or try again)
-            -- We check these independently in the same loop iteration to handle ordering
-            if not found_keyword then
-                if remaining_content:match("^agentic%s") or remaining_content:match("^agentic$") then
-                    processed_mode = "agentic"
-                    remaining_content = remaining_content:gsub("^agentic%s*", "")
-                    found_keyword = true
-                elseif remaining_content:match("^quick%s") or remaining_content:match("^quick$") then
-                    processed_mode = "quick"
-                    remaining_content = remaining_content:gsub("^quick%s*", "")
-                    found_keyword = true
-                end
-            end
-        end
-
+        local remaining_content, mode_override, agent_override = utils.parse_mode_agent_keywords(content)
         content = remaining_content
+        
+        -- Apply overrides if found
+        if mode_override then final_mode = mode_override end
+        if agent_override then final_agent = agent_override end
 
-        -- Apply detected mode
-        if processed_mode then
-            config.set_project_mode(processed_mode)
-            vim.notify("Switched to " .. processed_mode .. " mode", vim.log.levels.INFO)
+        -- Force update state and server sync before running
+        -- This ensures we always use the correct settings even if they haven't "changed"
+        -- 1. Update Mode
+        if config.get_project_mode() ~= final_mode then
+             config.set_project_mode(final_mode)
+             vim.notify("Switched to " .. final_mode .. " mode", vim.log.levels.INFO)
+        else
+             -- Ensure state is consistent even if logic thinks it's the same
+             config.state.mode = final_mode
         end
 
-        -- Apply detected agent by prepending the tag
-        if processed_agent then
-            -- Prepend to content so runner picks it up
-            if content == "" then
-                content = processed_agent
-            else
-                content = processed_agent .. " " .. content
+        -- 2. Update Agent
+        config.state.current_agent = final_agent
+        
+        -- 3. Sync to Server (if in agentic mode)
+        if final_mode == "agentic" then
+            -- Force model sync
+            server.set_server_model(config.state.selected_model)
+            -- Force agent sync
+            server.set_server_agent(final_agent)
+            
+            -- If we have a session ID, ensure it's synced too
+            if session_in_prompt then
+                server.set_server_session(session_in_prompt)
             end
         end
 
-        -- Handle #agentic and #quick mode switches (legacy/explicit tags anywhere in string)
-        if content:match("#agentic") then
-            config.set_project_mode("agentic")
-            content = content:gsub("#agentic%s*", ""):gsub("%s*#agentic", "")
-            vim.notify("Switched to agentic mode", vim.log.levels.INFO)
-        elseif content:match("#quick") then
-            config.set_project_mode("quick")
-            content = content:gsub("#quick%s*", ""):gsub("%s*#quick", "")
-            vim.notify("Switched to quick mode", vim.log.levels.INFO)
+        -- Prepend agent keyword if it was an override, so runner sees it if needed
+        -- (Though runner logic repeats some of this, passing it explicitly via state/server is safer)
+        -- We'll explicitly handle the agent in runner.lua via state/server, but 
+        -- we can also prepend the tag just in case runner relies on it for something specific.
+        -- Actually, runner.lua checks for #plan/#build tags. 
+        if agent_override == "plan" then
+             content = "#plan " .. content
+        elseif agent_override == "build" then
+             content = "#build " .. content
         end
 
         state.draft_content = nil

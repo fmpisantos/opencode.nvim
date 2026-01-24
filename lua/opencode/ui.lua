@@ -210,44 +210,23 @@ function M.get_window_title(content, session_id)
     -- If session ID is provided, try to load its settings
     if session_id then
         local settings = session.get_session_settings(session_id)
-        -- Apply session settings or fall back to defaults (matching init.lua logic)
-        project_mode = settings.mode or config.state.user_config.mode or "quick"
-        if settings.agent then agent_mode = settings.agent end
+        -- Apply session settings or fall back to current mode (matching init.lua logic)
+        -- We prioritize session settings, but if session doesn't specify (nil),
+        -- we keep the current project_mode (which comes from config/state)
+        if settings.mode then
+            project_mode = settings.mode
+        end
+        if settings.agent then 
+            agent_mode = settings.agent 
+        end
     end
 
     if content then
-        -- Check for explicit tags first (overrides session settings)
-        if content:match("#plan") then agent_mode = "plan" end
-        if content:match("#agentic") then project_mode = "agentic" end
-        if content:match("#quick") then project_mode = "quick" end
-
-        -- Simulate the iterative parsing of bare keywords to update the preview title correctly
-        local temp_content = content
-        local found = true
-        while found do
-            found = false
-            if temp_content:match("^plan%s") or temp_content:match("^plan$") then
-                agent_mode = "plan"
-                temp_content = temp_content:gsub("^plan%s*", "")
-                found = true
-            elseif temp_content:match("^build%s") or temp_content:match("^build$") then
-                agent_mode = "build"
-                temp_content = temp_content:gsub("^build%s*", "")
-                found = true
-            end
-            
-            if not found then
-                if temp_content:match("^agentic%s") or temp_content:match("^agentic$") then
-                    project_mode = "agentic"
-                    temp_content = temp_content:gsub("^agentic%s*", "")
-                    found = true
-                elseif temp_content:match("^quick%s") or temp_content:match("^quick$") then
-                    project_mode = "quick"
-                    temp_content = temp_content:gsub("^quick%s*", "")
-                    found = true
-                end
-            end
-        end
+        -- Check for explicit tags/keywords (overrides session settings)
+        local _, mode_override, agent_override = utils.parse_mode_agent_keywords(content)
+        
+        if mode_override then project_mode = mode_override end
+        if agent_override then agent_mode = agent_override end
     end
 
     local title = " OpenCode [" .. agent_mode .. "] [" .. project_mode .. "] [" .. config.get_model_display() .. "]"
