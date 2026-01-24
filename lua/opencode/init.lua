@@ -262,6 +262,15 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         -- Remove bare #session triggers (but keep #session(<id>))
         content = content:gsub("#session%s*$", ""):gsub("#session([%s\n])", "%1")
 
+        -- Check for session ID and load its settings
+        local session_in_prompt = content:match("#session%(([^)]+)%)")
+        if session_in_prompt then
+            local settings = session.get_session_settings(session_in_prompt)
+            -- Apply session settings or fall back to defaults
+            config.state.mode = settings.mode or config.state.user_config.mode or "quick"
+            config.state.current_agent = settings.agent or "build"
+        end
+
         -- Handle bare keywords for agent selection and mode switching iteratively
         -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
         local processed_agent = config.state.current_agent or "build"
@@ -589,6 +598,12 @@ local function open_session_picker(callback, for_append)
                             -- Load existing session
                             state.current_session_id = entry.id
                             state.current_session_name = entry.name
+
+                            -- Load session settings or fall back to defaults
+                            local settings = session.get_session_settings(entry.id)
+                            M.SetMode(settings.mode or config.defaults.mode or "quick")
+                            M.SetAgent(settings.agent or "build")
+
                             local content = session.load_session(entry.id)
                             if content then
                                 local buf, _ = ui.create_response_split("OpenCode Response", true)
@@ -599,6 +614,11 @@ local function open_session_picker(callback, for_append)
                             -- New session selected
                             session.clear_session()
                             session.start_new_session()
+
+                            -- Reset to defaults
+                            M.SetMode(config.state.user_config.mode or "quick")
+                            M.SetAgent("build")
+
                             vim.notify("Started new session", vim.log.levels.INFO)
                         end
                     end
@@ -758,6 +778,10 @@ function M.SetAgent(agent)
         vim.notify("Invalid agent: " .. tostring(agent) .. ". Use 'build' or 'plan'.", vim.log.levels.ERROR)
         return
     end
+
+    -- Update local state
+    config.state.current_agent = agent
+
     server.set_server_agent(agent, function(success, err)
         if success then
             vim.notify("OpenCode agent set to: " .. agent, vim.log.levels.INFO)

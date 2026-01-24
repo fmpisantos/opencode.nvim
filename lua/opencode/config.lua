@@ -101,28 +101,14 @@ else
         end
     end
 
-    -- Load project state from file
-    project_state = { bufnr = -1 }
-    if vim.fn.filereadable(project_file) == 1 then
-        local content = vim.fn.readfile(project_file)
-        if #content > 0 then
-            local ok, data = pcall(vim.json.decode, table.concat(content, "\n"))
-            if ok and data then
-                project_state = data
-            end
-        end
-    end
-
     -- Fallback save functions
     save_config_state = function(state)
         vim.fn.mkdir(vim.fn.fnamemodify(config_file, ":h"), "p")
         vim.fn.writefile({ vim.json.encode(state) }, config_file)
     end
 
-    save_project_state = function(state)
-        vim.fn.mkdir(vim.fn.fnamemodify(project_file, ":h"), "p")
-        vim.fn.writefile({ vim.json.encode(state) }, project_file)
-    end
+    -- Project state is no longer persisted
+    save_project_state = function(_) end
 end
 
 -- =============================================================================
@@ -144,14 +130,14 @@ end
 ---@field active_requests table
 ---@field next_request_id number
 ---@field servers table
----@field project_modes table
+---@field mode string|nil
 
 M.state = {
     -- Persistent state (loaded from shared_buffer or fallback on startup)
     selected_model = config_state.model,
-    project_modes = project_state.project_modes or {},
-
+    
     -- Runtime-only state
+    mode = nil, -- Current mode (quick/agentic)
     draft_content = nil,
     draft_cursor = nil,
     user_config = vim.deepcopy(M.defaults),
@@ -186,12 +172,6 @@ function M.save_config()
     save_config_state(config_state)
 end
 
---- Save project modes to shared_buffer
-function M.save_project_modes()
-    project_state.project_modes = M.state.project_modes
-    save_project_state(project_state)
-end
-
 -- =============================================================================
 -- Accessors
 -- =============================================================================
@@ -214,14 +194,15 @@ end
 --- Get the mode for the current project
 ---@return string mode "quick" or "agentic"
 function M.get_project_mode()
-    local cwd = M.get_cwd()
-    if M.state.project_modes[cwd] then
-        return M.state.project_modes[cwd]
+    -- Prioritize runtime state
+    if M.state.mode then
+        return M.state.mode
     end
+    -- Fallback to default config
     return M.state.user_config.mode or "quick"
 end
 
---- Set the mode for the current project
+--- Set the mode for the current project (Runtime only)
 ---@param mode string "quick" or "agentic"
 ---@return boolean success
 function M.set_project_mode(mode)
@@ -229,9 +210,7 @@ function M.set_project_mode(mode)
         vim.notify("Invalid mode: " .. tostring(mode) .. ". Use 'quick' or 'agentic'.", vim.log.levels.ERROR)
         return false
     end
-    local cwd = M.get_cwd()
-    M.state.project_modes[cwd] = mode
-    M.save_project_modes()
+    M.state.mode = mode
     return true
 end
 

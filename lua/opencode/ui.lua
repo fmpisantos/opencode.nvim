@@ -6,6 +6,7 @@ local M = {}
 -- UI components for opencode.nvim: windows, buffers, and spinner
 
 local config = require("opencode.config")
+local session = require("opencode.session")
 
 -- =============================================================================
 -- Spinner Class
@@ -206,8 +207,16 @@ function M.get_window_title(content, session_id)
     local agent_mode = config.state.current_agent or "build"
     local project_mode = config.get_project_mode()
     
+    -- If session ID is provided, try to load its settings
+    if session_id then
+        local settings = session.get_session_settings(session_id)
+        -- Apply session settings or fall back to defaults (matching init.lua logic)
+        project_mode = settings.mode or config.state.user_config.mode or "quick"
+        if settings.agent then agent_mode = settings.agent end
+    end
+
     if content then
-        -- Check for explicit tags first
+        -- Check for explicit tags first (overrides session settings)
         if content:match("#plan") then agent_mode = "plan" end
         if content:match("#agentic") then project_mode = "agentic" end
         if content:match("#quick") then project_mode = "quick" end

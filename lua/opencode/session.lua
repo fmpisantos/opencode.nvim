@@ -1,5 +1,8 @@
 local M = {}
 
+-- Cache for session settings to avoid repeated file I/O
+M._settings_cache = {}
+
 -- =============================================================================
 -- Session Module
 -- =============================================================================
@@ -15,7 +18,8 @@ local config = require("opencode.config")
 ---@return string
 function M.get_project_session_dir()
     -- Replace path separators and special chars with underscores
-    local safe_path = config.get_cwd():gsub("[/\\:*?\"<>|]", "_"):gsub("^_+", "")
+    -- Include backslash for Windows support
+    local safe_path = config.get_cwd():gsub("[/:*?<>|\"\\]", "_"):gsub("^_+", "")
     return config.paths.sessions_dir .. "/" .. safe_path
 end
 
@@ -30,29 +34,93 @@ end
 ---@param session_id string
 ---@param content string
 function M.save_session(session_id, content)
+    local filepath = M.get_session_file(session_id)
+    
+    -- Invalidate cache for this session (keyed by filepath to avoid cross-project collisions)
+    M._settings_cache[filepath] = nil
+
     local project_dir = M.get_project_session_dir()
     vim.fn.mkdir(project_dir, "p")
-    local filepath = M.get_session_file(session_id)
-    -- Prepend agent information to the session content
-    content = "#agent(" .. (config.state.current_agent or "build") .. ")\n" .. content
-    vim.fn.writefile(vim.split(content, "\n", { plain = true }), filepath)
+    
+    -- Strip existing metadata lines from the start of content to avoid duplication
+    local lines = vim.split(content, "\n", { plain = true })
+    local clean_lines = {}
+    local parsing_header = true
+    
+    for _, line in ipairs(lines) do
+        if parsing_header then
+            -- Skip specific metadata tags
+            if line:match("^#agent%(") or line:match("^#agentic") or line:match("^#quick") then
+                -- skip
+            elseif line == "" then
+                -- skip empty lines in header block to prevent fragmentation
+            else
+                parsing_header = false
+                table.insert(clean_lines, line)
+            end
+        else
+            table.insert(clean_lines, line)
+        end
+    end
+    
+    -- Prep metadata
+    local metadata = {}
+    if config.state.current_agent then
+        table.insert(metadata, "#agent(" .. config.state.current_agent .. ")")
+    end
+    local effective_mode = config.state.mode or config.state.user_config.mode or "quick"
+    if effective_mode == "agentic" then
+        table.insert(metadata, "#agentic")
+    elseif effective_mode == "quick" then
+        table.insert(metadata, "#quick")
+    end
+    
+    local meta_str = ""
+    if #metadata > 0 then
+        meta_str = table.concat(metadata, " ") .. "\n"
+    end
+    
+    local full_content = meta_str .. table.concat(clean_lines, "\n")
+    vim.fn.writefile(vim.split(full_content, "\n", { plain = true }), filepath)
 end
 
---- Load session content from file
+--- Get session settings (agent, mode) from file
 ---@param session_id string
----@return string|nil
-function M.load_session(session_id)
+---@return table { agent = string|nil, mode = string|nil }
+function M.get_session_settings(session_id)
     local filepath = M.get_session_file(session_id)
-    if vim.fn.filereadable(filepath) == 1 then
-        local content = vim.fn.readfile(filepath)
-        local first_line = content[1] or ""
-    if first_line:match("#agent%((.+)%)") then
-        config.state.current_agent = first_line:match("#agent%((.+)%)")
-        table.remove(content, 1)
+    
+    -- Return cached settings if available (keyed by filepath)
+    if M._settings_cache[filepath] then
+        return M._settings_cache[filepath]
     end
-    return table.concat(content, "\n")
+
+    if vim.fn.filereadable(filepath) == 0 then
+        return {}
     end
-    return nil
+
+    local content = vim.fn.readfile(filepath)
+    local settings = {}
+
+    -- Scan first few lines
+    for i, line in ipairs(content) do
+        if i > 20 then break end -- Limit scan
+
+        -- Check for agent
+        local agent = line:match("#agent%(([^)]+)%)")
+        if agent then settings.agent = agent end
+
+        -- Check for mode tags
+        if line:match("#agentic") then
+            settings.mode = "agentic"
+        elseif line:match("#quick") then
+            settings.mode = "quick"
+        end
+    end
+
+    -- Cache the result
+    M._settings_cache[filepath] = settings
+    return settings
 end
 
 --- List all available sessions for the current project
@@ -73,10 +141,7 @@ function M.list_sessions()
         for _, line in ipairs(content) do
             local trimmed = vim.trim(line)
             if trimmed ~= "" and not trimmed:match("^[#*`-]+$") and not trimmed:match("^%*%*") then
-                preview = trimmed:sub(1, 50)
-                if #trimmed > 50 then
-                    preview = preview .. "..."
-                end
+                preview = (trimmed:sub(1, 50) .. (#trimmed > 50 and "..." or ""))
                 break
             end
         end
