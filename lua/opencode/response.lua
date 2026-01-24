@@ -63,6 +63,8 @@ function M.parse_streaming_response(json_lines)
     local tool_status = nil
     local cli_session_id = nil
     local todos = nil
+    local question = nil
+    local options = nil
 
     for _, line in ipairs(json_lines) do
         if line and line ~= "" then
@@ -104,6 +106,11 @@ function M.parse_streaming_response(json_lines)
                         if data.part.tool == "todowrite" and state.input and state.input.todos then
                             todos = state.input.todos
                         end
+                        -- Capture questions and options
+                        if state.input and (state.input.question or state.input.options) then
+                            question = state.input.question
+                            options = state.input.options
+                        end
                     end
                 elseif data.type == "tool-call" and data.part then
                     -- Tool is being called (legacy format)
@@ -119,7 +126,7 @@ function M.parse_streaming_response(json_lines)
         end
     end
 
-    return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id, todos
+    return response_lines, error_message, is_thinking, current_tool, tool_status, cli_session_id, todos, question, options
 end
 
 -- =============================================================================
@@ -134,6 +141,8 @@ end
 ---@field session_id string|nil Current session ID
 ---@field message_id string|nil Current message ID
 ---@field todos table|nil Current todo list
+---@field question string|nil Current question for user
+---@field options table|nil Current options for user
 ---@field error_message string|nil Error message if any
 ---@field is_busy boolean Whether the session is busy
 ---@field last_text_part_id string|nil ID of the last text part (for full-text updates)
@@ -149,6 +158,8 @@ function M.create_sse_state()
         session_id = nil,
         message_id = nil,
         todos = nil,
+        question = nil,
+        options = nil,
         error_message = nil,
         is_busy = false,
         last_text_part_id = nil,
@@ -237,6 +248,11 @@ function M.process_sse_event(state, event_type, event_data)
                     if part.tool == "todowrite" and part.state.input and part.state.input.todos then
                         state.todos = part.state.input.todos
                     end
+                    -- Capture questions and options
+                    if part.state.input and (part.state.input.question or part.state.input.options) then
+                        state.question = part.state.input.question
+                        state.options = part.state.input.options
+                    end
                 end
                 changed = true
             end
@@ -304,12 +320,37 @@ M.parse_sse_event = M.process_sse_event
 ---@param state SSEState
 ---@return table response_lines Lines of response text
 function M.get_sse_response_lines(state)
-    if state.response_text == "" then
-        return {}
+    local lines = {}
+    
+    -- Add response text if present
+    if state.response_text ~= "" then
+        -- Normalize newlines and split
+        local text = state.response_text:gsub("\r\n", "\n"):gsub("\r", "\n")
+        vim.list_extend(lines, vim.split(text, "\n", { plain = true }))
     end
-    -- Normalize newlines and split
-    local text = state.response_text:gsub("\r\n", "\n"):gsub("\r", "\n")
-    return vim.split(text, "\n", { plain = true })
+    
+    -- Add questions and options if present
+    if state.question then
+        vim.list_extend(lines, M.format_question_block(state.question, state.options))
+    end
+    
+    return lines
+end
+
+--- Format a question and its options into display lines
+---@param question string
+---@param options table|nil
+---@return table lines
+function M.format_question_block(question, options)
+    local lines = { "", "**Question:** " .. question }
+    if options then
+        for i, option in ipairs(options) do
+            local label = type(option) == "table" and option.label or tostring(option)
+            table.insert(lines, string.format("%d. %s", i, label))
+        end
+    end
+    table.insert(lines, "")
+    return lines
 end
 
 return M

@@ -221,13 +221,24 @@ function M.run_opencode(prompt, files, source_file)
             local spinner_char = config.SPINNER_FRAMES[spinner_idx]
             spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
 
-            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos = response
+            local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, todos, question, options = response
                 .parse_streaming_response(json_lines)
 
             -- Capture CLI session ID if we don't have one yet
             if new_cli_session_id and not state.current_session_id then
                 state.current_session_id = new_cli_session_id
                 vim.b[buf].opencode_session_id = state.current_session_id
+            end
+
+            -- If we have a question, stop the runner so the user can answer
+            if question and is_running then
+                is_running = false
+                if update_timer then
+                    vim.fn.timer_stop(update_timer)
+                    update_timer = nil
+                end
+                -- Mark as no longer busy
+                requests.set_busy(false)
             end
 
             if is_running then
@@ -265,9 +276,14 @@ function M.run_opencode(prompt, files, source_file)
                 utils.append_stderr_block(display_lines, stderr_output)
             elseif #response_lines > 0 then
                 vim.list_extend(display_lines, response_lines)
-            elseif not is_running then
+            elseif not is_running and not question then
                 table.insert(display_lines, "No response received.")
                 utils.append_stderr_block(display_lines, stderr_output)
+            end
+
+            -- Display question and options if present
+            if question then
+                vim.list_extend(display_lines, response.format_question_block(question, options))
             end
 
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
@@ -372,7 +388,7 @@ function M.run_opencode(prompt, files, source_file)
                     requests.set_busy(false)
 
                     -- Final update
-                    local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(
+                    local response_lines, err, _, _, _, final_cli_session_id, _, question, options = response.parse_streaming_response(
                         json_lines)
                     local display_lines = vim.deepcopy(full_header)
 
@@ -385,7 +401,7 @@ function M.run_opencode(prompt, files, source_file)
                     if err then
                         table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                         utils.append_stderr_block(display_lines, stderr_output)
-                    elseif #response_lines == 0 then
+                    elseif #response_lines == 0 and not question then
                         if result.code ~= 0 then
                             table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
                             utils.append_stderr_block(display_lines, stderr_output)
@@ -395,6 +411,18 @@ function M.run_opencode(prompt, files, source_file)
                         end
                     else
                         vim.list_extend(display_lines, response_lines)
+                    end
+
+                    -- Display question and options if present
+                    if question then
+                        table.insert(display_lines, "")
+                        table.insert(display_lines, "**Question:** " .. question)
+                        if options then
+                            for i, option in ipairs(options) do
+                                table.insert(display_lines, string.format("%d. %s", i, option))
+                            end
+                        end
+                        table.insert(display_lines, "")
                     end
 
                     -- Update buffer if still valid
@@ -1013,13 +1041,24 @@ function M.run_opencode_command(command, args)
         local spinner_char = config.SPINNER_FRAMES[spinner_idx]
         spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
 
-        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id = response
+        local response_lines, err, is_thinking, current_tool, tool_status, new_cli_session_id, _, question, options = response
             .parse_streaming_response(json_lines)
 
         -- Capture CLI session ID if we don't have one yet
         if new_cli_session_id and not state.current_session_id then
             state.current_session_id = new_cli_session_id
             vim.b[buf].opencode_session_id = state.current_session_id
+        end
+
+        -- If we have a question, stop the runner so the user can answer
+        if question and is_running then
+            is_running = false
+            if update_timer then
+                vim.fn.timer_stop(update_timer)
+                update_timer = nil
+            end
+            -- Mark as no longer busy
+            requests.set_busy(false)
         end
 
         if is_running then
@@ -1052,9 +1091,21 @@ function M.run_opencode_command(command, args)
             utils.append_stderr_block(display_lines, stderr_output)
         elseif #response_lines > 0 then
             vim.list_extend(display_lines, response_lines)
-        elseif not is_running then
+        elseif not is_running and not question then
             table.insert(display_lines, "No response received.")
             utils.append_stderr_block(display_lines, stderr_output)
+        end
+
+        -- Display question and options if present
+        if question then
+            table.insert(display_lines, "")
+            table.insert(display_lines, "**Question:** " .. question)
+            if options then
+                for i, option in ipairs(options) do
+                    table.insert(display_lines, string.format("%d. %s", i, option))
+                end
+            end
+            table.insert(display_lines, "")
         end
 
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)
@@ -1157,7 +1208,7 @@ function M.run_opencode_command(command, args)
             requests.set_busy(false)
 
             -- Final update
-            local response_lines, err, _, _, _, final_cli_session_id = response.parse_streaming_response(json_lines)
+            local response_lines, err, _, _, _, final_cli_session_id, _, question, options = response.parse_streaming_response(json_lines)
             local display_lines = vim.deepcopy(header_lines)
 
             -- Ensure we have the CLI session ID for saving
@@ -1169,7 +1220,7 @@ function M.run_opencode_command(command, args)
             if err then
                 table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                 utils.append_stderr_block(display_lines, stderr_output)
-            elseif #response_lines == 0 then
+            elseif #response_lines == 0 and not question then
                 if result.code ~= 0 then
                     table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
                     utils.append_stderr_block(display_lines, stderr_output)
@@ -1179,6 +1230,18 @@ function M.run_opencode_command(command, args)
                 end
             else
                 vim.list_extend(display_lines, response_lines)
+            end
+
+            -- Display question and options if present
+            if question then
+                table.insert(display_lines, "")
+                table.insert(display_lines, "**Question:** " .. question)
+                if options then
+                    for i, option in ipairs(options) do
+                        table.insert(display_lines, string.format("%d. %s", i, option))
+                    end
+                end
+                table.insert(display_lines, "")
             end
 
             -- Update buffer if still valid
