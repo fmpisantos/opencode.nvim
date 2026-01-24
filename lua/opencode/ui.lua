@@ -7,6 +7,7 @@ local M = {}
 
 local config = require("opencode.config")
 local session = require("opencode.session")
+local utils = require("opencode.utils")
 
 -- =============================================================================
 -- Spinner Class
