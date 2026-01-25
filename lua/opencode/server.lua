@@ -26,6 +26,42 @@ local M = {}
 local config = require("opencode.config")
 
 -- =============================================================================
+-- Helper Functions
+-- =============================================================================
+
+--- Escape characters that have special meaning in pkill regex
+---@param text string The text to escape
+---@return string escaped_text
+local function escape_pkill_pattern(text)
+    -- Escape regex special characters: ^.[]$()|*+?{\
+    return text:gsub("([%^%.%[%]%$%(%)%|%*%+%?%{%}\\])", "\\%1")
+end
+
+--- Get the unique process tag for a given working directory
+---@param cwd string Working directory
+---@return string|nil tag The tag string or nil if project name cannot be determined
+local function get_process_tag(cwd)
+    local project_name = vim.fn.fnamemodify(cwd, ":t")
+    if project_name and project_name ~= "" then
+        return "fmpisantosOC-" .. project_name
+    end
+    return nil
+end
+
+--- Kill processes matching the project tag (cleanup fallback)
+---@param cwd string Working directory
+local function kill_server_by_tag(cwd)
+    local tag = get_process_tag(cwd)
+    if tag then
+        -- Sanitize the tag for regex usage in pkill
+        local safe_tag = escape_pkill_pattern(tag)
+        -- Use pkill to find and kill the process by its argument list
+        -- -f matches against full command line
+        vim.fn.system({ "pkill", "-f", safe_tag })
+    end
+end
+
+-- =============================================================================
 -- Server Registry (cross-instance tracking)
 -- =============================================================================
 
@@ -709,6 +745,10 @@ function M.stop_server_for_cwd()
                     vim.fn.system({ "kill", "-9", tostring(pid) })
                 end, 1000)
             end
+            
+            -- Also try to kill by tag to ensure cleanup even if PID tracking failed
+            kill_server_by_tag(cwd)
+
             -- Unregister from the global registry only if we own it
             unregister_server(cwd)
         end
@@ -756,6 +796,10 @@ function M.stop_all_servers(force)
                 count = count + 1
             end
         end
+        
+        -- Also try to kill by tag to ensure cleanup even if PID tracking failed
+        -- This satisfies: "Closing nvim will stop the processes with fmpisantosOC-<projectName>"
+        kill_server_by_tag(cwd)
     end
 
     if count > 0 then
@@ -776,6 +820,13 @@ function M.stop_all_servers(force)
 
     config.state.servers = {}
     return count
+end
+
+--- Kill all servers matching the fmpisantosOC-* tag globally
+--- This is used by OCStop to search for and stop all tagged processes
+function M.kill_all_tagged_servers()
+    -- pkill -f "fmpisantosOC-" will match any process with this string in its command line
+    vim.fn.system({ "pkill", "-f", "fmpisantosOC-" })
 end
 
 --- Check if a port is available (synchronous)
@@ -869,6 +920,17 @@ function M.start_server_for_cwd(callback)
         local port = find_available_port(ports, hostname)
 
         local cmd = { "opencode", "serve", "--port", tostring(port), "--hostname", hostname }
+
+        -- Use exec -a to set the process name (argv[0]) for easy identification in ps/pkill
+        -- This requires wrapping the command in sh -c
+        local tag = get_process_tag(cwd)
+        if tag then
+            local shell_cmd = "exec -a " .. vim.fn.shellescape(tag)
+            for _, arg in ipairs(cmd) do
+                shell_cmd = shell_cmd .. " " .. vim.fn.shellescape(arg)
+            end
+            cmd = { "sh", "-c", shell_cmd }
+        end
 
         local captured_port = nil
         local stderr_lines = {}

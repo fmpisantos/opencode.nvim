@@ -698,6 +698,10 @@ function M.StopAll()
     local request_count = requests.cancel_all_requests()
     local server_count = server.stop_all_servers()
 
+    -- Also kill any stray processes with the fmpisantosOC- tag
+    -- This satisfies: "user running OCStop ... can search for ... fmpisantosOC-<anything> and stop them"
+    server.kill_all_tagged_servers()
+
     if request_count > 0 or server_count > 0 then
         local parts = {}
         if request_count > 0 then
