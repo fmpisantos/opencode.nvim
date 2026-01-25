@@ -494,6 +494,9 @@ function M.OpenCodeReview()
     vim.keymap.set("n", "<Esc>", function()
         vim.api.nvim_win_close(win, true)
     end, { buffer = buf, noremap = true, silent = true })
+
+    -- Submit review with Enter in normal mode (same as :w)
+    vim.keymap.set("n", "<CR>", submit_review, { buffer = buf, noremap = true, silent = true, desc = "Submit review" })
 end
 
 -- =============================================================================
