@@ -30,58 +30,91 @@ function M.get_session_file(session_id)
     return M.get_project_session_dir() .. "/" .. session_id .. ".md"
 end
 
+--- Parse content lines, separating metadata header from body
+---@param lines table List of strings
+---@return table body_lines Lines without metadata header
+---@return table metadata Extracted metadata { agent = string|nil, mode = string|nil }
+local function parse_session_content(lines)
+    local body_lines = {}
+    local metadata = {}
+    local parsing_header = true
+
+    for _, line in ipairs(lines) do
+        if parsing_header then
+            -- Check for metadata tags
+            local agent = line:match("^#agent%(([^)]+)%)")
+            if agent then
+                metadata.agent = agent
+            elseif line:match("^#agentic") then
+                metadata.mode = "agentic"
+            elseif line:match("^#quick") then
+                metadata.mode = "quick"
+            elseif line == "" then
+                -- skip empty lines in header block
+            else
+                -- First non-metadata line marks end of header
+                parsing_header = false
+                table.insert(body_lines, line)
+            end
+        else
+            table.insert(body_lines, line)
+        end
+    end
+
+    return body_lines, metadata
+end
+
 --- Save session content to file
 ---@param session_id string
 ---@param content string
 function M.save_session(session_id, content)
     local filepath = M.get_session_file(session_id)
     
-    -- Invalidate cache for this session (keyed by filepath to avoid cross-project collisions)
+    -- Invalidate cache for this session
     M._settings_cache[filepath] = nil
 
     local project_dir = M.get_project_session_dir()
     vim.fn.mkdir(project_dir, "p")
     
-    -- Strip existing metadata lines from the start of content to avoid duplication
     local lines = vim.split(content, "\n", { plain = true })
-    local clean_lines = {}
-    local parsing_header = true
+    local body_lines, content_metadata = parse_session_content(lines)
     
-    for _, line in ipairs(lines) do
-        if parsing_header then
-            -- Skip specific metadata tags
-            if line:match("^#agent%(") or line:match("^#agentic") or line:match("^#quick") then
-                -- skip
-            elseif line == "" then
-                -- skip empty lines in header block to prevent fragmentation
-            else
-                parsing_header = false
-                table.insert(clean_lines, line)
-            end
-        else
-            table.insert(clean_lines, line)
-        end
+    -- Prep metadata - prefer content-derived values, fallback to state
+    local metadata_lines = {}
+    local agent_to_save = content_metadata.agent or config.state.current_agent
+    if agent_to_save then
+        table.insert(metadata_lines, "#agent(" .. agent_to_save .. ")")
     end
     
-    -- Prep metadata
-    local metadata = {}
-    if config.state.current_agent then
-        table.insert(metadata, "#agent(" .. config.state.current_agent .. ")")
-    end
-    local effective_mode = config.state.mode or config.state.user_config.mode or "quick"
+    local effective_mode = content_metadata.mode or config.state.mode or config.state.user_config.mode or "quick"
     if effective_mode == "agentic" then
-        table.insert(metadata, "#agentic")
+        table.insert(metadata_lines, "#agentic")
     elseif effective_mode == "quick" then
-        table.insert(metadata, "#quick")
+        table.insert(metadata_lines, "#quick")
     end
     
     local meta_str = ""
-    if #metadata > 0 then
-        meta_str = table.concat(metadata, " ") .. "\n"
+    if #metadata_lines > 0 then
+        meta_str = table.concat(metadata_lines, " ") .. "\n"
     end
     
-    local full_content = meta_str .. table.concat(clean_lines, "\n")
+    local full_content = meta_str .. table.concat(body_lines, "\n")
     vim.fn.writefile(vim.split(full_content, "\n", { plain = true }), filepath)
+end
+
+--- Load session content from file
+---@param session_id string
+---@return string|nil
+function M.load_session(session_id)
+    local filepath = M.get_session_file(session_id)
+    if vim.fn.filereadable(filepath) == 0 then
+        return nil
+    end
+
+    local content = vim.fn.readfile(filepath)
+    local body_lines, _ = parse_session_content(content)
+
+    return table.concat(body_lines, "\n")
 end
 
 --- Get session settings (agent, mode) from file

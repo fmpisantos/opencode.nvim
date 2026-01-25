@@ -880,7 +880,19 @@ function M.start_server_for_cwd(callback)
             stdout = function(err, data)
                 if data then
                     -- Look for port in stdout (format varies, common: "Listening on http://127.0.0.1:XXXXX")
-                    local port_match = data:match(":(%d+)")
+                    -- We use strict patterns to avoid matching timestamps (e.g. 10:04:05 -> port 4)
+                    local port_match = nil
+                    local patterns = {
+                        "http://[%w%.%-]+:(%d+)", -- http://127.0.0.1:4096
+                        "Listening on.*:(%d+)",   -- Listening on :4096
+                        "%f[%w]port%s+(%d+)",      -- port 4096 (with word boundary)
+                    }
+                    
+                    for _, pattern in ipairs(patterns) do
+                        port_match = data:match(pattern)
+                        if port_match then break end
+                    end
+                    
                     if port_match and not captured_port and not callback_invoked then
                         captured_port = tonumber(port_match)
                         local url = "http://" .. hostname .. ":" .. captured_port
@@ -917,8 +929,19 @@ function M.start_server_for_cwd(callback)
             stderr = function(err, data)
                 if data then
                     table.insert(stderr_lines, data)
-                    -- Also check stderr for port info
-                    local port_match = data:match(":(%d+)")
+                    -- Also check stderr for port info with strict patterns
+                    local port_match = nil
+                    local patterns = {
+                        "http://[%w%.%-]+:(%d+)", 
+                        "Listening on.*:(%d+)",
+                        "port (%d+)",
+                    }
+                    
+                    for _, pattern in ipairs(patterns) do
+                        port_match = data:match(pattern)
+                        if port_match then break end
+                    end
+
                     if port_match and not captured_port and not callback_invoked then
                         captured_port = tonumber(port_match)
                         local url = "http://" .. hostname .. ":" .. captured_port
