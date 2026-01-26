@@ -428,14 +428,7 @@ function M.run_opencode(prompt, files, source_file)
 
                     -- Display question and options if present
                     if question then
-                        table.insert(display_lines, "")
-                        table.insert(display_lines, "**Question:** " .. question)
-                        if options then
-                            for i, option in ipairs(options) do
-                                table.insert(display_lines, string.format("%d. %s", i, option))
-                            end
-                        end
-                        table.insert(display_lines, "")
+                        vim.list_extend(display_lines, response.format_question_block(question, options))
                     end
 
                     -- Update buffer if still valid
@@ -949,17 +942,21 @@ function M.run_opencode(prompt, files, source_file)
                     -- Server failed to start - mark as no longer busy
                     requests.set_busy(false)
                     if vim.api.nvim_buf_is_valid(buf) then
-                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+                        local lines = {
                             "**Mode:** [agentic]",
                             "",
                             "**Error:** Failed to start opencode server",
                             "",
                             "```",
-                            tostring(url_or_error),
+                        }
+                        local error_lines = vim.split(tostring(url_or_error), "\n", { plain = true })
+                        vim.list_extend(lines, error_lines)
+                        vim.list_extend(lines, {
                             "```",
                             "",
                             "Try switching to quick mode with `:OCMode quick` or check server logs.",
                         })
+                        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
                     end
                 end
             end)
@@ -1124,14 +1121,7 @@ function M.run_opencode_command(command, args)
 
         -- Display question and options if present
         if question then
-            table.insert(display_lines, "")
-            table.insert(display_lines, "**Question:** " .. question)
-            if options then
-                for i, option in ipairs(options) do
-                    table.insert(display_lines, string.format("%d. %s", i, option))
-                end
-            end
-            table.insert(display_lines, "")
+            vim.list_extend(display_lines, response.format_question_block(question, options))
         end
 
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, display_lines)

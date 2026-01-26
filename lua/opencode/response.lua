@@ -342,11 +342,28 @@ end
 ---@param options table|nil
 ---@return table lines
 function M.format_question_block(question, options)
-    local lines = { "", "**Question:** " .. question }
+    local lines = { "" }
+    
+    -- Handle question with newlines
+    local q_lines = vim.split(question, "\n", { plain = true })
+    if #q_lines > 0 then
+        table.insert(lines, "**Question:** " .. q_lines[1])
+        for i = 2, #q_lines do
+            table.insert(lines, q_lines[i])
+        end
+    end
+
     if options then
         for i, option in ipairs(options) do
             local label = type(option) == "table" and option.label or tostring(option)
-            table.insert(lines, string.format("%d. %s", i, label))
+            -- Handle option label with newlines
+            local l_lines = vim.split(label, "\n", { plain = true })
+            if #l_lines > 0 then
+                table.insert(lines, string.format("%d. %s", i, l_lines[1]))
+                for j = 2, #l_lines do
+                    table.insert(lines, "   " .. l_lines[j]) -- Indent subsequent lines
+                end
+            end
         end
     end
     table.insert(lines, "")
