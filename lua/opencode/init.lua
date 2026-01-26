@@ -613,10 +613,10 @@ local function open_session_picker(callback, for_append)
                             session.clear_session()
                             session.start_new_session()
 
-                            -- Reset to defaults
-                            M.SetMode(config.state.user_config.mode or "quick")
-                            M.SetAgent(config.state.user_config.agent or "build")
-
+                            -- Do NOT reset to defaults here. 
+                            -- Keep the current mode/agent if the user has changed them via :OCMode or :OCAgent.
+                            -- Defaults are handled by config.get_project_mode() and OpenCode() logic if state is nil.
+                            
                             vim.notify("Started new session", vim.log.levels.INFO)
                         end
                     end

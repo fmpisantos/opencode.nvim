@@ -68,7 +68,7 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Determine agent mode
     -- In agentic mode, use server's stored agent as default
-    local agent = config.state.user_config.agent or "build" -- Default from config
+    local agent = config.state.current_agent or config.state.user_config.agent or "build" -- Default from config
     local agent_changed_by_prompt = false
     if mode == "agentic" then
         local srv = server.get_server_for_cwd()
