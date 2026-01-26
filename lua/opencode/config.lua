@@ -137,9 +137,9 @@ end
 M.state = {
     -- Persistent state (loaded from shared_buffer or fallback on startup)
     selected_model = config_state.model,
+    mode = config_state.mode, -- Initial mode from persistent config
     
     -- Runtime-only state
-    mode = nil, -- Current mode (quick/agentic)
     draft_content = nil,
     draft_cursor = nil,
     user_config = vim.deepcopy(M.defaults),
@@ -168,9 +168,10 @@ M.state = {
 -- Config Persistence (via shared_buffer)
 -- =============================================================================
 
---- Save model configuration to shared_buffer
+--- Save configuration (model, mode) to shared_buffer
 function M.save_config()
     config_state.model = M.state.selected_model
+    config_state.mode = M.state.mode
     save_config_state(config_state)
 end
 

@@ -745,6 +745,7 @@ function M.SetMode(mode)
     end
 
     if config.set_project_mode(mode) then
+        config.save_config()
         vim.notify("OpenCode mode set to: " .. mode, vim.log.levels.INFO)
 
         -- If switching to agentic mode and server is running, sync state
