@@ -68,7 +68,7 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Determine agent mode
     -- In agentic mode, use server's stored agent as default
-    local agent = "build"
+    local agent = config.state.user_config.agent or "build" -- Default from config
     local agent_changed_by_prompt = false
     if mode == "agentic" then
         local srv = server.get_server_for_cwd()
@@ -239,6 +239,19 @@ function M.run_opencode(prompt, files, source_file)
                 end
                 -- Mark as no longer busy
                 requests.set_busy(false)
+
+                -- Prompt with Telescope if options are available
+                if options and #options > 0 then
+                    vim.schedule(function()
+                        ui.prompt_question_with_telescope(question, options, function(selection)
+                            if selection == "Type your own answer..." then
+                                vim.cmd("OpenCode")
+                            else
+                                M.run_opencode(selection)
+                            end
+                        end)
+                    end)
+                end
             end
 
             if is_running then
@@ -1059,6 +1072,19 @@ function M.run_opencode_command(command, args)
             end
             -- Mark as no longer busy
             requests.set_busy(false)
+
+            -- Prompt with Telescope if options are available
+            if options and #options > 0 then
+                vim.schedule(function()
+                    ui.prompt_question_with_telescope(question, options, function(selection)
+                        if selection == "Type your own answer..." then
+                            vim.cmd("OpenCode")
+                        else
+                            M.run_opencode(selection)
+                        end
+                    end)
+                end)
+            end
         end
 
         if is_running then

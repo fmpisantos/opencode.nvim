@@ -240,6 +240,50 @@ function M.get_window_title(content, session_id)
 end
 
 -- =============================================================================
+-- Question Prompt (Telescope)
+-- =============================================================================
+
+--- Prompt user with question options using Telescope
+---@param question string
+---@param options table
+---@param on_select function(selection: string) Callback with selected option
+function M.prompt_question_with_telescope(question, options, on_select)
+    local has_telescope, pickers = pcall(require, "telescope.pickers")
+    if not has_telescope then
+        return
+    end
+
+    local finders = require("telescope.finders")
+    local conf = require("telescope.config").values
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+
+    local custom_entry = "Type your own answer..."
+    local results = { custom_entry }
+    for _, opt in ipairs(options) do
+        table.insert(results, opt)
+    end
+
+    pickers.new({}, {
+        prompt_title = question,
+        finder = finders.new_table({
+            results = results,
+        }),
+        sorter = conf.generic_sorter({}),
+        attach_mappings = function(prompt_bufnr, _)
+            actions.select_default:replace(function()
+                actions.close(prompt_bufnr)
+                local selection = action_state.get_selected_entry()
+                if selection then
+                    on_select(selection[1])
+                end
+            end)
+            return true
+        end,
+    }):find()
+end
+
+-- =============================================================================
 -- Auto-reload Setup
 -- =============================================================================
 

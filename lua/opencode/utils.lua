@@ -227,7 +227,7 @@ function M.sanitize_line(str)
     if not str then
         return ""
     end
-    return str:gsub("[\r\n]+", " ")
+    return (str:gsub("[\r\n]+", " "))
 end
 
 --- Append stderr output to display lines

@@ -284,7 +284,7 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         -- Determine base mode and agent from session or current state
         -- Priority: Session Settings > Current State > Defaults
         local final_mode = session_settings.mode or config.get_project_mode()
-        local final_agent = session_settings.agent or config.state.current_agent or "build"
+        local final_agent = session_settings.agent or config.state.current_agent or config.state.user_config.agent or "build"
 
         -- Handle keywords for agent selection and mode switching iteratively
         -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
@@ -615,7 +615,7 @@ local function open_session_picker(callback, for_append)
 
                             -- Reset to defaults
                             M.SetMode(config.state.user_config.mode or "quick")
-                            M.SetAgent("build")
+                            M.SetAgent(config.state.user_config.agent or "build")
 
                             vim.notify("Started new session", vim.log.levels.INFO)
                         end

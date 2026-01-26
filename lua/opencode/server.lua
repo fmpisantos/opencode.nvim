@@ -560,11 +560,12 @@ function M.get_server_for_cwd()
                     process = nil, -- We don't own this process
                     port = entry.port,
                     url = entry.url,
-                    cwd = cwd,
-                    starting = false,
-                    agent = "build", -- Default agent
-                    model = config.state.selected_model,
-                    session_id = config.state.current_session_id,
+                cwd = cwd,
+                starting = false,
+                agent = config.state.user_config.agent or "build", -- Default agent, will be synced via API if needed
+                model = config.state.selected_model,
+                session_id = config.state.current_session_id,
+
                     external = true, -- Flag to indicate we didn't start this server
                 }
                 return config.state.servers[cwd]
@@ -609,7 +610,7 @@ function M.get_server_agent()
     if server and server.agent then
         return server.agent
     end
-    return "build" -- Default agent
+    return config.state.user_config.agent or "build" -- Default agent
 end
 
 --- Set the agent for the current server
@@ -883,7 +884,7 @@ function M.start_server_for_cwd(callback)
                 url = registered.url,
                 cwd = cwd,
                 starting = false,
-                agent = "build", -- Default agent, will be synced via API if needed
+                agent = config.state.user_config.agent or "build", -- Default agent, will be synced via API if needed
                 model = config.state.selected_model,
                 session_id = config.state.current_session_id,
                 external = true, -- Flag to indicate we didn't start this server
@@ -974,7 +975,7 @@ function M.start_server_for_cwd(callback)
                                 url = url,
                                 cwd = cwd,                                    -- Store cwd for consistency when running commands
                                 starting = false,
-                                agent = "build",                              -- Default agent
+                                agent = config.state.user_config.agent or "build",                              -- Default agent
                                 model = config.state.selected_model,          -- Sync model from global state
                                 session_id = config.state.current_session_id, -- Sync session from global state
                                 external = false,                             -- We own this server
@@ -1023,7 +1024,7 @@ function M.start_server_for_cwd(callback)
                                 url = url,
                                 cwd = cwd,                                    -- Store cwd for consistency when running commands
                                 starting = false,
-                                agent = "build",                              -- Default agent
+                                agent = config.state.user_config.agent or "build",                              -- Default agent
                                 model = config.state.selected_model,          -- Sync model from global state
                                 session_id = config.state.current_session_id, -- Sync session from global state
                                 external = false,                             -- We own this server
@@ -1108,7 +1109,7 @@ function M.ensure_server_running(callback)
                 url = registered.url,
                 cwd = cwd,
                 starting = false,
-                agent = "build", -- Default agent, will be synced via API if needed
+                agent = config.state.user_config.agent or "build", -- Default agent, will be synced via API if needed
                 model = config.state.selected_model,
                 session_id = config.state.current_session_id,
                 external = true, -- Flag to indicate we didn't start this server

@@ -51,6 +51,8 @@ M.defaults = {
     --              MCP server cold boot times on every request.
     --              See: https://opencode.ai/docs/cli/#attach
     mode = "quick",
+    -- Default agent to use ("build" or "plan")
+    agent = "build",
     -- Server settings for agentic mode
     server = {
         -- Ordered list of ports to try. The server will use the first available port.
