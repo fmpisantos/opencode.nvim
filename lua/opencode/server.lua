@@ -923,14 +923,15 @@ function M.start_server_for_cwd(callback)
         local cmd = { "opencode", "serve", "--port", tostring(port), "--hostname", hostname }
 
         -- Use exec -a to set the process name (argv[0]) for easy identification in ps/pkill
-        -- This requires wrapping the command in sh -c
+        -- exec -a is a bash builtin extension on many systems, so invoke bash -c to ensure
+        -- the `-a` flag is supported (some /bin/sh implementations like dash don't support it)
         local tag = get_process_tag(cwd)
         if tag then
             local shell_cmd = "exec -a " .. vim.fn.shellescape(tag)
             for _, arg in ipairs(cmd) do
                 shell_cmd = shell_cmd .. " " .. vim.fn.shellescape(arg)
             end
-            cmd = { "sh", "-c", shell_cmd }
+            cmd = { "bash", "-c", shell_cmd }
         end
 
         local captured_port = nil
