@@ -284,6 +284,188 @@ function M.prompt_question_with_telescope(question, options, on_select)
 end
 
 -- =============================================================================
+-- Permission & Question Prompts (opencode interactive flow)
+-- =============================================================================
+
+--- Close a floating window and its buffer safely
+---@param buf number|nil
+---@param win number|nil
+local function close_floating(buf, win)
+    if win and vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+    end
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+end
+
+--- Prompt user to allow/deny an opencode permission request
+--- Keymaps (normal mode inside the window):
+---   a  → reply "once"    (allow once)
+---   A  → reply "always"  (allow and remember)
+---   d  → reply "reject"
+---   q / <Esc> → close without replying (caller decides what to do)
+---@param permission table PermissionRequest from opencode ({ id, permission, patterns, metadata, ... })
+---@param on_reply function(reply: "once"|"always"|"reject"|nil)
+function M.prompt_permission(permission, on_reply)
+    local lines = {}
+    table.insert(lines, "Permission requested: " .. tostring(permission.permission or "?"))
+    table.insert(lines, "")
+    if permission.patterns and #permission.patterns > 0 then
+        table.insert(lines, "Patterns:")
+        for _, p in ipairs(permission.patterns) do
+            table.insert(lines, "  " .. tostring(p))
+        end
+        table.insert(lines, "")
+    end
+    if permission.metadata and next(permission.metadata) ~= nil then
+        table.insert(lines, "Details:")
+        for k, v in pairs(permission.metadata) do
+            local rendered = type(v) == "string" and v or vim.inspect(v)
+            for _, rline in ipairs(vim.split(rendered, "\n", { plain = true })) do
+                table.insert(lines, "  " .. k .. ": " .. rline)
+                k = string.rep(" ", #k) -- only show key on first line
+            end
+        end
+        table.insert(lines, "")
+    end
+    table.insert(lines, "[a] allow once   [A] always allow   [d] reject   [q] dismiss")
+
+    local width = 0
+    for _, l in ipairs(lines) do
+        if #l > width then width = #l end
+    end
+    width = math.min(math.max(width + 4, 50), vim.o.columns - 4)
+    local height = math.min(#lines + 2, vim.o.lines - 6)
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].filetype = "opencode-permission"
+
+    local win = vim.api.nvim_open_win(buf, true, {
+        relative = "editor",
+        width = width,
+        height = height,
+        col = math.floor((vim.o.columns - width) / 2),
+        row = math.floor((vim.o.lines - height) / 2),
+        style = "minimal",
+        border = "rounded",
+        title = " OpenCode Permission ",
+        title_pos = "center",
+    })
+
+    local replied = false
+    local function reply(answer)
+        if replied then return end
+        replied = true
+        close_floating(buf, win)
+        on_reply(answer)
+    end
+
+    local map = function(lhs, rhs)
+        vim.keymap.set("n", lhs, rhs, { buffer = buf, nowait = true, silent = true, noremap = true })
+    end
+    map("a", function() reply("once") end)
+    map("A", function() reply("always") end)
+    map("d", function() reply("reject") end)
+    map("q", function() reply(nil) end)
+    map("<Esc>", function() reply(nil) end)
+end
+
+--- Prompt user to answer an opencode question request (single question for now; first entry in questions[])
+--- If the question allows multiple selections the user can pick one at a time via Telescope; for now we
+--- submit a single-choice answer (the most common case). Custom typed answers are offered when `custom` is true.
+---@param question_req table QuestionRequest ({ id, questions[], ... })
+---@param on_reply function(answers: string[][]|nil) Called with answers table (one entry per question) or nil if cancelled
+function M.prompt_question(question_req, on_reply)
+    local has_telescope, pickers = pcall(require, "telescope.pickers")
+    if not has_telescope then
+        vim.notify("Telescope is required to answer opencode questions", vim.log.levels.ERROR)
+        on_reply(nil)
+        return
+    end
+
+    local finders = require("telescope.finders")
+    local conf = require("telescope.config").values
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+
+    local questions = question_req.questions or {}
+    if #questions == 0 then
+        on_reply(nil)
+        return
+    end
+
+    local answers = {}
+
+    -- Collect answers sequentially for each question entry.
+    local function ask(idx)
+        if idx > #questions then
+            on_reply(answers)
+            return
+        end
+        local q = questions[idx]
+        local custom_entry = "Type your own answer..."
+        local results = {}
+        if q.custom ~= false then
+            table.insert(results, custom_entry)
+        end
+        for _, opt in ipairs(q.options or {}) do
+            local label = type(opt) == "table" and opt.label or tostring(opt)
+            local desc = type(opt) == "table" and opt.description or nil
+            table.insert(results, { label = label, description = desc })
+        end
+
+        pickers.new({}, {
+            prompt_title = q.question or q.header or "OpenCode question",
+            finder = finders.new_table({
+                results = results,
+                entry_maker = function(entry)
+                    if entry == custom_entry then
+                        return { value = entry, display = entry, ordinal = entry }
+                    end
+                    local display = entry.label
+                    if entry.description and entry.description ~= "" then
+                        display = entry.label .. "  — " .. entry.description
+                    end
+                    return { value = entry.label, display = display, ordinal = entry.label }
+                end,
+            }),
+            sorter = conf.generic_sorter({}),
+            attach_mappings = function(prompt_bufnr, _)
+                actions.select_default:replace(function()
+                    actions.close(prompt_bufnr)
+                    local selection = action_state.get_selected_entry()
+                    if not selection then
+                        on_reply(nil)
+                        return
+                    end
+                    if selection.value == custom_entry then
+                        vim.ui.input({ prompt = (q.header or "Answer") .. ": " }, function(input)
+                            if input == nil or input == "" then
+                                on_reply(nil)
+                                return
+                            end
+                            answers[idx] = { input }
+                            ask(idx + 1)
+                        end)
+                    else
+                        answers[idx] = { selection.value }
+                        ask(idx + 1)
+                    end
+                end)
+                return true
+            end,
+        }):find()
+    end
+
+    ask(1)
+end
+
+-- =============================================================================
 -- Auto-reload Setup
 -- =============================================================================
 

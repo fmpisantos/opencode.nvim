@@ -360,6 +360,55 @@ function M.abort_session(server_url, session_id, callback)
     end)
 end
 
+--- Reply to a permission request
+---@param server_url string Server base URL
+---@param request_id string Permission request ID (per*)
+---@param reply string One of "once" | "always" | "reject"
+---@param message? string Optional message to include with the reply
+---@param callback? function Called with (success, error_or_nil)
+function M.reply_to_permission(server_url, request_id, reply, message, callback)
+    local body = { reply = reply }
+    if message and message ~= "" then
+        body.message = message
+    end
+    local path = "/permission/" .. request_id .. "/reply"
+    http_request(server_url, "POST", path, body, function(success, result)
+        if callback then
+            callback(success, success and nil or tostring(result))
+        end
+    end)
+end
+
+--- Reply to a question request
+--- `answers` is an array aligned with the original questions array; each entry
+--- is an array of selected option labels (multiple-select) or a single custom string.
+---@param server_url string Server base URL
+---@param request_id string Question request ID (que*)
+---@param answers table Array of QuestionAnswer (string[][])
+---@param callback? function Called with (success, error_or_nil)
+function M.reply_to_question(server_url, request_id, answers, callback)
+    local body = { answers = answers }
+    local path = "/question/" .. request_id .. "/reply"
+    http_request(server_url, "POST", path, body, function(success, result)
+        if callback then
+            callback(success, success and nil or tostring(result))
+        end
+    end)
+end
+
+--- Reject a question request
+---@param server_url string Server base URL
+---@param request_id string Question request ID (que*)
+---@param callback? function Called with (success, error_or_nil)
+function M.reject_question(server_url, request_id, callback)
+    local path = "/question/" .. request_id .. "/reject"
+    http_request(server_url, "POST", path, nil, function(success, result)
+        if callback then
+            callback(success, success and nil or tostring(result))
+        end
+    end)
+end
+
 -- =============================================================================
 -- SSE Event Stream
 -- =============================================================================

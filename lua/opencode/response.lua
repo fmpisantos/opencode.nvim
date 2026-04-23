@@ -134,24 +134,29 @@ end
 -- =============================================================================
 
 ---@class SSEState
----@field response_text string Accumulated response text
+---@field response_text string Accumulated response text (rebuilt from text_parts)
+---@field text_parts table Ordered list of { id, text } entries for text parts
+---@field text_parts_index table Map from part id to index in text_parts
 ---@field is_thinking boolean Whether model is currently thinking
 ---@field current_tool string|nil Current tool being executed
 ---@field tool_status string|nil Status of the tool execution
 ---@field session_id string|nil Current session ID
 ---@field message_id string|nil Current message ID
 ---@field todos table|nil Current todo list
----@field question string|nil Current question for user
----@field options table|nil Current options for user
+---@field question string|nil Current question for user (legacy tool-embedded)
+---@field options table|nil Current options for user (legacy tool-embedded)
+---@field pending_permission table|nil Active opencode permission request (PermissionRequest)
+---@field pending_question table|nil Active opencode question request (QuestionRequest)
 ---@field error_message string|nil Error message if any
 ---@field is_busy boolean Whether the session is busy
----@field last_text_part_id string|nil ID of the last text part (for full-text updates)
 
 --- Create a new SSE state for tracking streaming responses
 ---@return SSEState
 function M.create_sse_state()
     return {
         response_text = "",
+        text_parts = {},
+        text_parts_index = {},
         is_thinking = false,
         current_tool = nil,
         tool_status = nil,
@@ -160,10 +165,63 @@ function M.create_sse_state()
         todos = nil,
         question = nil,
         options = nil,
+        pending_permission = nil,
+        pending_question = nil,
         error_message = nil,
         is_busy = false,
-        last_text_part_id = nil,
     }
+end
+
+--- Rebuild response_text from the ordered text parts
+---@param state SSEState
+local function rebuild_response_text(state)
+    local buf = {}
+    for _, p in ipairs(state.text_parts) do
+        buf[#buf + 1] = p.text
+    end
+    state.response_text = table.concat(buf)
+end
+
+--- Update (append delta or replace full text) a text part and rebuild response_text
+---@param state SSEState
+---@param part_id string
+---@param delta string|nil
+---@param full_text string|nil
+---@return boolean changed
+local function upsert_text_part(state, part_id, delta, full_text)
+    if not part_id then
+        -- No id to track — fall back to accumulating onto a synthetic trailing part
+        part_id = "__notrack__"
+    end
+
+    local idx = state.text_parts_index[part_id]
+    local changed = false
+
+    if delta and delta ~= "" then
+        if idx then
+            state.text_parts[idx].text = state.text_parts[idx].text .. delta
+        else
+            table.insert(state.text_parts, { id = part_id, text = delta })
+            state.text_parts_index[part_id] = #state.text_parts
+        end
+        changed = true
+    elseif full_text and full_text ~= "" then
+        if idx then
+            if state.text_parts[idx].text ~= full_text then
+                state.text_parts[idx].text = full_text
+                changed = true
+            end
+        else
+            table.insert(state.text_parts, { id = part_id, text = full_text })
+            state.text_parts_index[part_id] = #state.text_parts
+            changed = true
+        end
+    end
+
+    if changed then
+        rebuild_response_text(state)
+    end
+    return changed
 end
 
 --- Process an SSE event and update state
@@ -214,29 +272,8 @@ function M.process_sse_event(state, event_type, event_data)
                 state.is_thinking = false
                 state.current_tool = nil
 
-                if delta then
-                    -- Incremental delta - append to response_text
-                    state.response_text = state.response_text .. delta
-                    state.last_text_part_id = part.id
+                if upsert_text_part(state, part.id, delta, part.text) then
                     changed = true
-                elseif part.text and part.text ~= "" then
-                    -- Full text - this could be a replacement or initial full text
-                    -- If it's the same part ID, this is an update (replace)
-                    -- If it's a new part ID, append it
-                    if part.id == state.last_text_part_id then
-                        -- Same part, likely a full replacement - but we already have delta text
-                        -- In practice, servers usually send either deltas OR full text, not both
-                        -- If we already have content, don't replace it
-                        if state.response_text == "" then
-                            state.response_text = part.text
-                            changed = true
-                        end
-                    else
-                        -- New part with full text (no delta) - append it
-                        state.response_text = state.response_text .. part.text
-                        state.last_text_part_id = part.id
-                        changed = true
-                    end
                 end
 
             elseif part.type == "reasoning" then
@@ -307,6 +344,55 @@ function M.process_sse_event(state, event_type, event_data)
     elseif event_type == "todo.updated" then
         if event_data.todos then
             state.todos = event_data.todos
+            changed = true
+        end
+
+    elseif event_type == "message.part.delta" then
+        -- opencode emits delta chunks as their own event with fields:
+        -- { sessionID, messageID, partID, field, delta }
+        if event_data.sessionID and not state.session_id then
+            state.session_id = event_data.sessionID
+        end
+        if event_data.messageID and not state.message_id then
+            state.message_id = event_data.messageID
+        end
+        if event_data.field == "text" and event_data.delta and event_data.delta ~= "" then
+            state.is_thinking = false
+            state.current_tool = nil
+            if upsert_text_part(state, event_data.partID, event_data.delta, nil) then
+                changed = true
+            end
+        end
+
+    elseif event_type == "permission.asked" then
+        -- Payload is the PermissionRequest object directly
+        if event_data and event_data.id then
+            state.pending_permission = event_data
+            if event_data.sessionID and not state.session_id then
+                state.session_id = event_data.sessionID
+            end
+            changed = true
+        end
+
+    elseif event_type == "permission.replied" then
+        -- Clear pending permission if it matches
+        if state.pending_permission and state.pending_permission.id == event_data.requestID then
+            state.pending_permission = nil
+            changed = true
+        end
+
+    elseif event_type == "question.asked" then
+        if event_data and event_data.id then
+            state.pending_question = event_data
+            if event_data.sessionID and not state.session_id then
+                state.session_id = event_data.sessionID
+            end
+            changed = true
+        end
+
+    elseif event_type == "question.replied" or event_type == "question.rejected" then
+        if state.pending_question and state.pending_question.id == event_data.requestID then
+            state.pending_question = nil
             changed = true
         end
     end

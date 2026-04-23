@@ -615,11 +615,36 @@ function M.run_opencode(prompt, files, source_file)
                 local response_lines = response.get_sse_response_lines(sse_state)
                 -- Filter out prompt echo (streaming)
                 response_lines = utils.filter_prompt_from_response(response_lines, prompt, false)
-                
+
                 if #response_lines > 0 then
                     vim.list_extend(display_lines, response_lines)
                 elseif not is_running then
                     table.insert(display_lines, "No response received.")
+                end
+            end
+
+            -- Surface pending permission / question in the response buffer so the user sees
+            -- what the plugin is awaiting even if the floating prompt is covered.
+            if sse_state.pending_permission then
+                table.insert(display_lines, "")
+                table.insert(display_lines,
+                    "**Awaiting permission:** " .. tostring(sse_state.pending_permission.permission or "?"))
+                if sse_state.pending_permission.patterns then
+                    for _, p in ipairs(sse_state.pending_permission.patterns) do
+                        table.insert(display_lines, "  - `" .. tostring(p) .. "`")
+                    end
+                end
+                table.insert(display_lines, "_Use the floating prompt: `a` allow once, `A` always, `d` reject._")
+            end
+            if sse_state.pending_question then
+                local qs = sse_state.pending_question.questions or {}
+                if qs[1] then
+                    table.insert(display_lines, "")
+                    table.insert(display_lines, "**Awaiting answer:** " .. tostring(qs[1].question or qs[1].header or ""))
+                    for _, opt in ipairs(qs[1].options or {}) do
+                        local label = type(opt) == "table" and opt.label or tostring(opt)
+                        table.insert(display_lines, "  - " .. label)
+                    end
                 end
             end
 
@@ -748,6 +773,71 @@ function M.run_opencode(prompt, files, source_file)
             local sse_connected = false
             local message_sent = false
             local post_completed = false
+            -- Interactive-prompt tracking (so we only open one UI per request)
+            local active_permission_id = nil
+            local active_question_id = nil
+            local awaiting_user = false
+
+            local function handle_pending_prompts()
+                -- Permission prompt
+                local perm = sse_state.pending_permission
+                if perm and perm.id and perm.id ~= active_permission_id then
+                    active_permission_id = perm.id
+                    awaiting_user = true
+                    vim.schedule(function()
+                        ui.prompt_permission(perm, function(reply)
+                            if not reply then
+                                -- User dismissed without replying; treat as reject to unblock the session
+                                reply = "reject"
+                            end
+                            server.reply_to_permission(server_url, perm.id, reply, nil, function(success, err)
+                                vim.schedule(function()
+                                    awaiting_user = false
+                                    if not success then
+                                        vim.notify("Permission reply failed: " .. tostring(err),
+                                            vim.log.levels.ERROR)
+                                    end
+                                    if is_running then update_display() end
+                                end)
+                            end)
+                        end)
+                    end)
+                end
+
+                -- Question prompt
+                local q = sse_state.pending_question
+                if q and q.id and q.id ~= active_question_id then
+                    active_question_id = q.id
+                    awaiting_user = true
+                    vim.schedule(function()
+                        ui.prompt_question(q, function(answers)
+                            if not answers then
+                                server.reject_question(server_url, q.id, function(success, err)
+                                    vim.schedule(function()
+                                        awaiting_user = false
+                                        if not success then
+                                            vim.notify("Question reject failed: " .. tostring(err),
+                                                vim.log.levels.ERROR)
+                                        end
+                                        if is_running then update_display() end
+                                    end)
+                                end)
+                                return
+                            end
+                            server.reply_to_question(server_url, q.id, answers, function(success, err)
+                                vim.schedule(function()
+                                    awaiting_user = false
+                                    if not success then
+                                        vim.notify("Question reply failed: " .. tostring(err),
+                                            vim.log.levels.ERROR)
+                                    end
+                                    if is_running then update_display() end
+                                end)
+                            end)
+                        end)
+                    end)
+                end
+            end
 
             -- Function to send the message (called after SSE connects)
             local function send_message()
@@ -826,6 +916,24 @@ function M.run_opencode(prompt, files, source_file)
                         if part_type == "text" or part_type == "tool" or part_type == "reasoning" or part_type == "thinking" then
                             response_started = true
                         end
+                    elseif event_type == "message.part.delta" then
+                        response_started = true
+                    end
+
+                    -- If opencode is asking for permission or a question, surface the UI
+                    -- and hold off on finalizing until the user answers.
+                    handle_pending_prompts()
+
+                    local function try_finalize()
+                        -- Do not finalize while we are awaiting a user answer or still have
+                        -- pending interactive prompts — the server goes idle while asking.
+                        if awaiting_user or sse_state.pending_permission or sse_state.pending_question then
+                            idle_after_response = false
+                            return
+                        end
+                        if is_running and idle_after_response then
+                            finalize()
+                        end
                     end
 
                     -- Check for completion: session.idle after we've started receiving response or seen busy state
@@ -833,22 +941,14 @@ function M.run_opencode(prompt, files, source_file)
                     if event_type == "session.idle" and (response_started or busy_seen or post_completed) then
                         idle_after_response = true
                         -- Small delay to ensure all parts are received
-                        vim.defer_fn(function()
-                            if is_running and idle_after_response then
-                                finalize()
-                            end
-                        end, 100)
+                        vim.defer_fn(try_finalize, 100)
                     end
 
                     -- Check for session.status busy -> idle transition
                     if event_type == "session.status" and event_data.status then
                         if event_data.status.type == "idle" and (response_started or busy_seen or post_completed) then
                             idle_after_response = true
-                            vim.defer_fn(function()
-                                if is_running and idle_after_response then
-                                    finalize()
-                                end
-                            end, 100)
+                            vim.defer_fn(try_finalize, 100)
                         end
                     end
 
