@@ -560,6 +560,7 @@ local function open_session_picker(callback, for_append)
     local conf = require("telescope.config").values
     local actions = require("telescope.actions")
     local action_state = require("telescope.actions.state")
+    local previewers = require("telescope.previewers")
 
     local state = config.state
     local sessions = session.list_sessions()
@@ -569,6 +570,25 @@ local function open_session_picker(callback, for_append)
     for _, sess in ipairs(sessions) do
         table.insert(entries, sess)
     end
+
+    local session_previewer = previewers.new_buffer_previewer({
+        title = "Session Preview",
+        define_preview = function(self, entry, _)
+            local entry_val = entry.value
+            local bufnr = self.state.bufnr
+            if not entry_val or not entry_val.id then
+                vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "Start a new session" })
+                return
+            end
+            local content = session.load_session(entry_val.id)
+            if content and content ~= "" then
+                vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.split(content, "\n", { plain = true }))
+            else
+                vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "(empty session)" })
+            end
+            vim.bo[bufnr].filetype = "markdown"
+        end,
+    })
 
     pickers.new({}, {
         prompt_title = for_append and "Select Session to Continue" or "OpenCode Sessions",
@@ -583,6 +603,7 @@ local function open_session_picker(callback, for_append)
             end,
         }),
         sorter = conf.generic_sorter({}),
+        previewer = session_previewer,
         attach_mappings = function(prompt_bufnr, _)
             actions.select_default:replace(function()
                 actions.close(prompt_bufnr)

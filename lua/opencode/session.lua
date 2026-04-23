@@ -34,7 +34,7 @@ end
 ---@param lines table List of strings
 ---@return table body_lines Lines without metadata header
 ---@return table metadata Extracted metadata { agent = string|nil, mode = string|nil }
-local function parse_session_content(lines)
+function M.parse_session_content(lines)
     local body_lines = {}
     local metadata = {}
     local header_done = false
@@ -89,7 +89,7 @@ function M.save_session(session_id, content)
     vim.fn.mkdir(project_dir, "p")
     
     local lines = vim.split(content, "\n", { plain = true })
-    local body_lines, content_metadata = parse_session_content(lines)
+    local body_lines, content_metadata = M.parse_session_content(lines)
     
     -- Prep metadata - prefer content-derived values, fallback to state
     local metadata_lines = {}
@@ -124,7 +124,7 @@ function M.load_session(session_id)
     end
 
     local content = vim.fn.readfile(filepath)
-    local body_lines, _ = parse_session_content(content)
+    local body_lines, _ = M.parse_session_content(content)
 
     return table.concat(body_lines, "\n")
 end
@@ -180,13 +180,20 @@ function M.list_sessions()
         local filename = vim.fn.fnamemodify(filepath, ":t:r")
         local mtime = vim.fn.getftime(filepath)
         local content = vim.fn.readfile(filepath)
+        local body_lines, _ = M.parse_session_content(content)
 
-        -- Extract first meaningful line as name preview
+        -- Extract first meaningful line from the body as name preview.
+        -- Skip blank lines, pure decoration (---, ***, ``` fences, bullets),
+        -- and markdown bold markers that wrap role headers like "**You:**".
         local preview = "Empty session"
-        for _, line in ipairs(content) do
+        for _, line in ipairs(body_lines) do
             local trimmed = vim.trim(line)
-            if trimmed ~= "" and not trimmed:match("^[#*`-]+$") and not trimmed:match("^%*%*") then
-                preview = (trimmed:sub(1, 50) .. (#trimmed > 50 and "..." or ""))
+            local stripped = trimmed:gsub("^%*+", ""):gsub("%*+$", "")
+            stripped = vim.trim(stripped)
+            if stripped ~= ""
+                and not trimmed:match("^[#*`%-=_]+$")
+                and not trimmed:match("^```") then
+                preview = (stripped:sub(1, 60) .. (#stripped > 60 and "..." or ""))
                 break
             end
         end
