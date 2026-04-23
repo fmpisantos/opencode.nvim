@@ -60,6 +60,15 @@ M.defaults = {
         ports = { 4096, 4097, 4098, 4099, 4100, 4101, 4102, 4103, 4104, 4105 },
         hostname = "127.0.0.1",
     },
+    -- Session title generation (displayed in :OCSessions).
+    -- When enabled, each prompt spawns a second, non-blocking `opencode run`
+    -- that summarizes the request into a short title stored in the session file.
+    title_enabled = true,
+    -- Model used for title generation (e.g. "anthropic/claude-haiku-4-5").
+    -- When nil, --model is omitted and opencode's default is used.
+    title_model = nil,
+    -- Timeout for the title-gen subprocess; output is only a few words.
+    title_timeout_ms = 15000,
 }
 
 -- =============================================================================
@@ -162,6 +171,10 @@ M.state = {
     -- Server management state (for agentic mode)
     -- Keyed by cwd: { [cwd] = { process = system_obj, port = number, url = string, starting = bool } }
     servers = {},
+
+    -- In-flight title-generation subprocesses, keyed by session id. A new
+    -- dispatch for the same session cancels the previous one.
+    title_gen_systems = {},
 }
 
 -- =============================================================================

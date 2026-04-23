@@ -23,6 +23,115 @@ local response = require("opencode.response")
 local server = require("opencode.server")
 
 -- =============================================================================
+-- Title Generation
+-- =============================================================================
+
+--- Strip all plugin-specific markers from a prompt so what gets sent to the
+--- title summarizer is the user's bare request.
+---@param prompt string
+---@return string
+local function strip_prompt_markers(prompt)
+    if not prompt then return "" end
+    local cleaned = prompt
+    -- Drop #session(id), #agent(name), #title(name)
+    cleaned = cleaned:gsub("#session%([^)]+%)", "")
+    cleaned = cleaned:gsub("#agent%([^)]+%)", "")
+    cleaned = cleaned:gsub("#title%([^)]*%)", "")
+    -- Drop bare-word tags. Frontier pattern ensures "#agenticfoo" is skipped.
+    for _, tag in ipairs({ "#agentic", "#quick", "#plan", "#build", "#buffer", "#buf" }) do
+        cleaned = cleaned:gsub(tag .. "%f[%W]", "")
+    end
+    -- Drop leading "quick"/"agentic"/"plan"/"build" shorthand keywords.
+    cleaned = cleaned:gsub("^%s*(plan)%s+", "")
+    cleaned = cleaned:gsub("^%s*(build)%s+", "")
+    cleaned = cleaned:gsub("^%s*(agentic)%s+", "")
+    cleaned = cleaned:gsub("^%s*(quick)%s+", "")
+    cleaned = cleaned:gsub("%s+", " ")
+    return vim.trim(cleaned)
+end
+
+--- Build the summarization prompt shown to the title-gen model.
+---@param user_request string
+---@return string
+local function build_title_prompt(user_request)
+    return table.concat({
+        "In 3 to 7 words, summarize the following request as a short session title.",
+        "Output ONLY the title text — no quotes, no markdown, no trailing punctuation.",
+        "",
+        "Request:",
+        user_request,
+    }, "\n")
+end
+
+--- Dispatch a non-blocking `opencode run` call that produces a short title
+--- for the current session and writes it back to the session file.
+--- Safe to call from any code path; cancels a previous title call for the
+--- same session id before dispatching a new one.
+---@param session_id string|nil
+---@param raw_prompt string
+function M._dispatch_title_gen(session_id, raw_prompt)
+    if not session_id or session_id == "" then return end
+    if not config.state.user_config.title_enabled then return end
+
+    local cleaned = strip_prompt_markers(raw_prompt or "")
+    if cleaned == "" then return end
+
+    -- Cancel any in-flight title call for this session — user answer was
+    -- "regenerate on every prompt", so the newest request wins.
+    local pending = config.state.title_gen_systems[session_id]
+    if pending then
+        pcall(function() pending:kill(15) end)
+        config.state.title_gen_systems[session_id] = nil
+    end
+
+    local cmd = { "opencode", "run", "--agent", "build", "--format", "json" }
+    local title_model = config.state.user_config.title_model
+    if title_model and title_model ~= "" then
+        table.insert(cmd, "--model")
+        table.insert(cmd, title_model)
+    end
+    -- Use `--` so the summarizer prompt is treated as a positional arg.
+    table.insert(cmd, "--")
+    table.insert(cmd, build_title_prompt(cleaned))
+
+    local timeout_ms = config.state.user_config.title_timeout_ms or 15000
+    local ok, system_obj = pcall(vim.system, cmd, {
+        cwd = config.get_cwd(),
+        text = true,
+        timeout = timeout_ms,
+    }, function(result)
+        vim.schedule(function()
+            config.state.title_gen_systems[session_id] = nil
+            if not result or result.code ~= 0 then return end
+
+            local json_lines = {}
+            for line in (result.stdout or ""):gmatch("[^\r\n]+") do
+                table.insert(json_lines, line)
+            end
+            local text, err = response.parse_opencode_response(json_lines)
+            if err or not text or text == "" then return end
+
+            -- Take the first non-empty line — the model occasionally prefixes
+            -- the title with a short preamble despite instructions.
+            local first_line
+            for line in text:gmatch("[^\r\n]+") do
+                local trimmed = vim.trim(line)
+                if trimmed ~= "" then
+                    first_line = trimmed
+                    break
+                end
+            end
+            if not first_line then return end
+            session.set_title(session_id, first_line)
+        end)
+    end)
+
+    if ok and system_obj then
+        config.state.title_gen_systems[session_id] = system_obj
+    end
+end
+
+-- =============================================================================
 -- Run OpenCode
 -- =============================================================================
 
@@ -105,6 +214,10 @@ function M.run_opencode(prompt, files, source_file)
         if mode == "agentic" then
             server.set_server_session(cli_session_id)
         end
+        -- Continuation path: session id is known up front, dispatch title-gen
+        -- in parallel with the main request so the stored title tracks the
+        -- user's latest prompt (and backfills when previously missing).
+        M._dispatch_title_gen(cli_session_id, prompt)
     end
 
     -- Get existing content if continuing
@@ -228,6 +341,9 @@ function M.run_opencode(prompt, files, source_file)
             if new_cli_session_id and not state.current_session_id then
                 state.current_session_id = new_cli_session_id
                 vim.b[buf].opencode_session_id = state.current_session_id
+                -- First time this new session got an id — kick off title gen
+                -- now that we have somewhere to store the result.
+                M._dispatch_title_gen(new_cli_session_id, prompt)
             end
 
             -- If we have a question, stop the runner so the user can answer
@@ -415,6 +531,11 @@ function M.run_opencode(prompt, files, source_file)
                     if final_cli_session_id and not state.current_session_id then
                         state.current_session_id = final_cli_session_id
                         vim.b[buf].opencode_session_id = state.current_session_id
+                        -- Fallback: streaming path didn't capture the session
+                        -- id (e.g. nothing came through stdout before the
+                        -- final result). Dispatch here so the title still
+                        -- lands.
+                        M._dispatch_title_gen(final_cli_session_id, prompt)
                     end
 
                     if err then
@@ -573,6 +694,9 @@ function M.run_opencode(prompt, files, source_file)
                 vim.b[buf].opencode_session_id = state.current_session_id
                 server.set_server_session(sse_state.session_id)
                 -- Note: Header will be updated on next display call with new session_id
+                -- First time this new agentic session got an id — kick off
+                -- title gen in parallel with the SSE stream.
+                M._dispatch_title_gen(sse_state.session_id, prompt)
             end
 
             if is_running then

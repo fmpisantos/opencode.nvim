@@ -48,6 +48,7 @@ function M.parse_session_content(lines)
             table.insert(body_lines, line)
         else
             local residue = line
+            residue = residue:gsub("#title%([^)]*%)", "")
             residue = residue:gsub("#agent%([^)]+%)", "")
             residue = residue:gsub("#agentic", "")
             residue = residue:gsub("#quick", "")
@@ -62,6 +63,8 @@ function M.parse_session_content(lines)
             else
                 -- Pure-metadata line: extract every tag present (one line may
                 -- carry multiple, e.g. "#agent(build) #quick").
+                local title = line:match("#title%(([^)]*)%)")
+                if title then metadata.title = title end
                 local agent = line:match("#agent%(([^)]+)%)")
                 if agent then metadata.agent = agent end
                 if line:match("#agentic") then
@@ -90,14 +93,31 @@ function M.save_session(session_id, content)
     
     local lines = vim.split(content, "\n", { plain = true })
     local body_lines, content_metadata = M.parse_session_content(lines)
-    
-    -- Prep metadata - prefer content-derived values, fallback to state
+
+    -- Preserve a #title(...) already on disk so an incremental save from the
+    -- main runner doesn't clobber a title written by the parallel title-gen
+    -- callback. Only title is merged — agent/mode still defer to runtime
+    -- state so toggling mode mid-session takes effect on the next save.
+    if vim.fn.filereadable(filepath) == 1 and not content_metadata.title then
+        local disk_content = vim.fn.readfile(filepath)
+        local _, disk_metadata = M.parse_session_content(disk_content)
+        if disk_metadata.title then
+            content_metadata.title = disk_metadata.title
+        end
+    end
+
+    -- Prep metadata - prefer content-derived values, fallback to state.
+    -- Title is kept on its own line so it stays readable and separable
+    -- from the #agent/#mode tags that tools may parse independently.
     local metadata_lines = {}
+    if content_metadata.title and content_metadata.title ~= "" then
+        table.insert(metadata_lines, "#title(" .. content_metadata.title .. ")")
+    end
     local agent_to_save = content_metadata.agent or config.state.current_agent
     if agent_to_save then
         table.insert(metadata_lines, "#agent(" .. agent_to_save .. ")")
     end
-    
+
     local effective_mode = content_metadata.mode or config.state.mode or config.state.user_config.mode or "quick"
     if effective_mode == "agentic" then
         table.insert(metadata_lines, "#agentic")
@@ -110,6 +130,64 @@ function M.save_session(session_id, content)
         meta_str = table.concat(metadata_lines, " ") .. "\n"
     end
     
+    local full_content = meta_str .. table.concat(body_lines, "\n")
+    vim.fn.writefile(vim.split(full_content, "\n", { plain = true }), filepath)
+end
+
+--- Sanitize a model-generated title for safe storage in #title(...)
+---@param title string
+---@return string
+local function sanitize_title(title)
+    if type(title) ~= "string" then return "" end
+    -- Collapse whitespace, drop ) so the #title(...) wrapper stays parseable,
+    -- strip control chars, then trim surrounding quotes/punctuation.
+    local clean = title:gsub("[%c]", " "):gsub("%)", ""):gsub("%s+", " ")
+    clean = vim.trim(clean)
+    clean = clean:gsub('^["\']+', ""):gsub('["\']+$', "")
+    clean = clean:gsub("%.+$", "")
+    clean = vim.trim(clean)
+    if #clean > 80 then
+        clean = clean:sub(1, 80)
+    end
+    return clean
+end
+
+--- Write (or overwrite) the #title(...) tag for a session. Safe to call
+--- even before the session file has been created by the main runner — in
+--- that case a header-only file is written and the next save merges cleanly.
+---@param session_id string
+---@param title string
+function M.set_title(session_id, title)
+    if not session_id or session_id == "" then return end
+    local clean = sanitize_title(title or "")
+    if clean == "" then return end
+
+    local filepath = M.get_session_file(session_id)
+    M._settings_cache[filepath] = nil
+
+    local project_dir = M.get_project_session_dir()
+    vim.fn.mkdir(project_dir, "p")
+
+    local body_lines = {}
+    local existing_metadata = {}
+    if vim.fn.filereadable(filepath) == 1 then
+        local disk_content = vim.fn.readfile(filepath)
+        body_lines, existing_metadata = M.parse_session_content(disk_content)
+    end
+    existing_metadata.title = clean
+
+    local metadata_lines = {}
+    table.insert(metadata_lines, "#title(" .. existing_metadata.title .. ")")
+    if existing_metadata.agent then
+        table.insert(metadata_lines, "#agent(" .. existing_metadata.agent .. ")")
+    end
+    if existing_metadata.mode == "agentic" then
+        table.insert(metadata_lines, "#agentic")
+    elseif existing_metadata.mode == "quick" then
+        table.insert(metadata_lines, "#quick")
+    end
+
+    local meta_str = table.concat(metadata_lines, " ") .. "\n"
     local full_content = meta_str .. table.concat(body_lines, "\n")
     vim.fn.writefile(vim.split(full_content, "\n", { plain = true }), filepath)
 end
@@ -151,6 +229,10 @@ function M.get_session_settings(session_id)
     for i, line in ipairs(content) do
         if i > 20 then break end -- Limit scan
 
+        -- Check for title
+        local title = line:match("#title%(([^)]*)%)")
+        if title then settings.title = title end
+
         -- Check for agent
         local agent = line:match("#agent%(([^)]+)%)")
         if agent then settings.agent = agent end
@@ -180,21 +262,26 @@ function M.list_sessions()
         local filename = vim.fn.fnamemodify(filepath, ":t:r")
         local mtime = vim.fn.getftime(filepath)
         local content = vim.fn.readfile(filepath)
-        local body_lines, _ = M.parse_session_content(content)
+        local body_lines, metadata = M.parse_session_content(content)
 
-        -- Extract first meaningful line from the body as name preview.
-        -- Skip blank lines, pure decoration (---, ***, ``` fences, bullets),
-        -- and markdown bold markers that wrap role headers like "**You:**".
-        local preview = "Empty session"
-        for _, line in ipairs(body_lines) do
-            local trimmed = vim.trim(line)
-            local stripped = trimmed:gsub("^%*+", ""):gsub("%*+$", "")
-            stripped = vim.trim(stripped)
-            if stripped ~= ""
-                and not trimmed:match("^[#*`%-=_]+$")
-                and not trimmed:match("^```") then
-                preview = (stripped:sub(1, 60) .. (#stripped > 60 and "..." or ""))
-                break
+        -- Prefer the AI-generated #title(...) when present. Fall back to the
+        -- first meaningful body line so older sessions without a stored title
+        -- still get something readable.
+        local preview
+        if metadata.title and metadata.title ~= "" then
+            preview = metadata.title
+        else
+            preview = "Empty session"
+            for _, line in ipairs(body_lines) do
+                local trimmed = vim.trim(line)
+                local stripped = trimmed:gsub("^%*+", ""):gsub("%*+$", "")
+                stripped = vim.trim(stripped)
+                if stripped ~= ""
+                    and not trimmed:match("^[#*`%-=_]+$")
+                    and not trimmed:match("^```") then
+                    preview = (stripped:sub(1, 60) .. (#stripped > 60 and "..." or ""))
+                    break
+                end
             end
         end
 
