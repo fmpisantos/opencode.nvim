@@ -288,7 +288,13 @@ function M.run_opencode(prompt, files, source_file)
                 table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                 utils.append_stderr_block(display_lines, stderr_output)
             elseif #response_lines > 0 then
-                vim.list_extend(display_lines, response_lines)
+                -- Filter out prompt echo (streaming)
+                local filtered_lines = utils.filter_prompt_from_response(response_lines, prompt, false)
+                if #filtered_lines > 0 then
+                    vim.list_extend(display_lines, filtered_lines)
+                elseif not is_running and not question then
+                     table.insert(display_lines, "No response received.")
+                end
             elseif not is_running and not question then
                 table.insert(display_lines, "No response received.")
                 utils.append_stderr_block(display_lines, stderr_output)
@@ -414,16 +420,21 @@ function M.run_opencode(prompt, files, source_file)
                     if err then
                         table.insert(display_lines, "**Error:** " .. utils.sanitize_line(err))
                         utils.append_stderr_block(display_lines, stderr_output)
-                    elseif #response_lines == 0 and not question then
-                        if result.code ~= 0 then
-                            table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
-                            utils.append_stderr_block(display_lines, stderr_output)
-                        else
-                            table.insert(display_lines, "No response received.")
-                            utils.append_stderr_block(display_lines, stderr_output)
-                        end
                     else
-                        vim.list_extend(display_lines, response_lines)
+                        -- Filter out prompt echo (final)
+                        response_lines = utils.filter_prompt_from_response(response_lines, prompt, true)
+
+                        if #response_lines == 0 and not question then
+                            if result.code ~= 0 then
+                                table.insert(display_lines, "**Error:** opencode exited with code " .. result.code)
+                                utils.append_stderr_block(display_lines, stderr_output)
+                            else
+                                table.insert(display_lines, "No response received.")
+                                utils.append_stderr_block(display_lines, stderr_output)
+                            end
+                        else
+                            vim.list_extend(display_lines, response_lines)
+                        end
                     end
 
                     -- Display question and options if present
@@ -493,10 +504,7 @@ function M.run_opencode(prompt, files, source_file)
 
         -- Determine session to use (continue existing or create new)
         local session_to_use = cli_session_id
-        if not session_to_use and srv and srv.session_id then
-            session_to_use = srv.session_id
-        end
-
+        
         -- Build header for this query (showing HTTP API mode)
         -- Helper function to build agentic header lines
         local function build_agentic_header(session_display)
@@ -605,6 +613,9 @@ function M.run_opencode(prompt, files, source_file)
                 table.insert(display_lines, "**Error:** " .. utils.sanitize_line(sse_state.error_message))
             else
                 local response_lines = response.get_sse_response_lines(sse_state)
+                -- Filter out prompt echo (streaming)
+                response_lines = utils.filter_prompt_from_response(response_lines, prompt, false)
+                
                 if #response_lines > 0 then
                     vim.list_extend(display_lines, response_lines)
                 elseif not is_running then
@@ -695,6 +706,9 @@ function M.run_opencode(prompt, files, source_file)
                 table.insert(display_lines, "**Error:** " .. utils.sanitize_line(sse_state.error_message))
             else
                 local response_lines = response.get_sse_response_lines(sse_state)
+                -- Filter out prompt echo (final)
+                response_lines = utils.filter_prompt_from_response(response_lines, prompt, true)
+
                 if #response_lines > 0 then
                     vim.list_extend(display_lines, response_lines)
                 else
@@ -925,17 +939,51 @@ function M.run_opencode(prompt, files, source_file)
 
     -- Execute based on mode
     if mode == "agentic" then
-        -- Show "starting server" message in buffer
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-            "**Mode:** [agentic]",
-            "",
-            "Starting opencode server... " .. config.SPINNER_FRAMES[1],
-        })
+        -- Show "starting server" message in buffer with animation
+        local spinner_idx = 1
+        local is_starting = true
+        local startup_timer = nil
+
+        local function update_startup_spinner()
+            if not vim.api.nvim_buf_is_valid(buf) then
+                return
+            end
+            local spinner_char = config.SPINNER_FRAMES[spinner_idx]
+            spinner_idx = (spinner_idx % #config.SPINNER_FRAMES) + 1
+
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+                "**Mode:** [agentic]",
+                "",
+                "Starting opencode server... " .. spinner_char,
+            })
+        end
+
+        local function start_startup_timer()
+            startup_timer = vim.fn.timer_start(config.SPINNER_INTERVAL_MS, function()
+                vim.schedule(function()
+                    if is_starting then
+                        update_startup_spinner()
+                        start_startup_timer()
+                    end
+                end)
+            end)
+        end
+
+        -- Start animation
+        update_startup_spinner()
+        start_startup_timer()
 
         -- Ensure server is running, then execute via HTTP API
         -- Note: Agent is now passed per-message via POST /session/:id/prompt_async
         server.ensure_server_running(function(success, url_or_error)
             vim.schedule(function()
+                -- Stop animation
+                is_starting = false
+                if startup_timer then
+                    vim.fn.timer_stop(startup_timer)
+                    startup_timer = nil
+                end
+
                 if success then
                     execute_agentic(url_or_error)
                 else

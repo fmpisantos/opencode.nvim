@@ -195,22 +195,24 @@ function M.parse_mode_agent_keywords(content)
     end
 
     -- Also handle legacy/tag syntax anywhere in string (#agentic, #quick)
-    -- These override prefix keywords if present
-    if remaining_content:match("#agentic") then
+    -- These override prefix keywords if present.
+    -- `%f[%W]` is a frontier pattern asserting the next char is a non-word
+    -- boundary (or end of string) so "#agenticfoo" is not treated as a tag.
+    if remaining_content:match("#agentic%f[%W]") then
         mode = "agentic"
-        remaining_content = remaining_content:gsub("#agentic%s*", ""):gsub("%s*#agentic", "")
-    elseif remaining_content:match("#quick") then
+        remaining_content = remaining_content:gsub("#agentic%f[%W]%s*", ""):gsub("%s*#agentic%f[%W]", "")
+    elseif remaining_content:match("#quick%f[%W]") then
         mode = "quick"
-        remaining_content = remaining_content:gsub("#quick%s*", ""):gsub("%s*#quick", "")
+        remaining_content = remaining_content:gsub("#quick%f[%W]%s*", ""):gsub("%s*#quick%f[%W]", "")
     end
-    
+
     -- Also handle #plan/#build tags anywhere
-    if remaining_content:match("#plan") then
+    if remaining_content:match("#plan%f[%W]") then
         agent = "plan"
-        remaining_content = remaining_content:gsub("#plan%s*", ""):gsub("%s*#plan", "")
-    elseif remaining_content:match("#build") then
+        remaining_content = remaining_content:gsub("#plan%f[%W]%s*", ""):gsub("%s*#plan%f[%W]", "")
+    elseif remaining_content:match("#build%f[%W]") then
         agent = "build"
-        remaining_content = remaining_content:gsub("#build%s*", ""):gsub("%s*#build", "")
+        remaining_content = remaining_content:gsub("#build%f[%W]%s*", ""):gsub("%s*#build%f[%W]", "")
     end
 
     return remaining_content, mode, agent
@@ -326,6 +328,64 @@ function M.build_opencode_cmd(base_args, prompt, files)
         end
     end
     return cmd
+end
+
+--- Filter out prompt echo from response lines
+---@param response_lines table Array of response lines
+---@param prompt string The original prompt text
+---@param is_final boolean Whether the response is complete (stop hiding partial matches)
+---@return table filtered_lines
+function M.filter_prompt_from_response(response_lines, prompt, is_final)
+    if not prompt or prompt == "" or #response_lines == 0 then
+        return response_lines
+    end
+
+    -- Normalize prompt: remove trailing newlines to avoid empty last element split issue
+    -- We use gsub instead of vim.trim to preserve leading indentation which might be echoed exactly
+    local clean_prompt = prompt:gsub("[\r\n]+$", "")
+    if clean_prompt == "" then return response_lines end
+    
+    local prompt_lines = vim.split(clean_prompt, "\n", { plain = true })
+    
+    local match_length = 0
+    local is_match = true
+    
+    -- Check how many lines match from the beginning
+    -- We only check up to #prompt_lines
+    for i = 1, math.min(#response_lines, #prompt_lines) do
+        -- Use exact match for now, maybe relax if needed later
+        if response_lines[i] ~= prompt_lines[i] then
+            is_match = false
+            break
+        end
+        match_length = i
+    end
+    
+    if is_match then
+        if match_length == #prompt_lines then
+            -- Full prompt match found at start. Strip it.
+            local new_lines = {}
+            for i = match_length + 1, #response_lines do
+                table.insert(new_lines, response_lines[i])
+            end
+            
+            -- Remove leading empty lines from result
+            while #new_lines > 0 and new_lines[1] == "" do
+                table.remove(new_lines, 1)
+            end
+            
+            return new_lines
+        elseif not is_final then
+            -- Partial match (response is shorter than prompt and matches so far).
+            -- If not final, hide it (return empty) as we expect it to be the prompt echoing.
+            return {} 
+        else
+            -- Partial match but final. Return what we have.
+            return response_lines
+        end
+    end
+    
+    return response_lines
 end
 
 return M

@@ -194,6 +194,11 @@ function M.process_sse_event(state, event_type, event_data)
         local part = event_data.part
         local delta = event_data.delta
 
+        -- Ignore user message parts (echoed back by server)
+        if event_data.role == "user" or (part and part.role == "user") then
+            return false
+        end
+
         if part then
             -- Capture session ID and message ID
             if part.sessionID and not state.session_id then
@@ -261,10 +266,10 @@ function M.process_sse_event(state, event_type, event_data)
     elseif event_type == "message.updated" then
         local info = event_data.info
         if info then
-            if info.sessionID then
+            if info.sessionID and not state.session_id then
                 state.session_id = info.sessionID
             end
-            if info.id then
+            if info.id and not state.message_id then
                 state.message_id = info.id
             end
             -- Check for error in message

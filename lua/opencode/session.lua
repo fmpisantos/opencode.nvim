@@ -37,27 +37,39 @@ end
 local function parse_session_content(lines)
     local body_lines = {}
     local metadata = {}
-    local parsing_header = true
+    local header_done = false
 
+    -- The header is the leading run of lines whose non-whitespace content is
+    -- ENTIRELY metadata tags. Any line containing other text ends the header,
+    -- which matters when the saved body happens to begin with a line like
+    -- `#agentic ...` — without this check it would be eaten as metadata.
     for _, line in ipairs(lines) do
-        if parsing_header then
-            -- Check for metadata tags
-            local agent = line:match("^#agent%(([^)]+)%)")
-            if agent then
-                metadata.agent = agent
-            elseif line:match("^#agentic") then
-                metadata.mode = "agentic"
-            elseif line:match("^#quick") then
-                metadata.mode = "quick"
-            elseif line == "" then
-                -- skip empty lines in header block
-            else
-                -- First non-metadata line marks end of header
-                parsing_header = false
-                table.insert(body_lines, line)
-            end
-        else
+        if header_done then
             table.insert(body_lines, line)
+        else
+            local residue = line
+            residue = residue:gsub("#agent%([^)]+%)", "")
+            residue = residue:gsub("#agentic", "")
+            residue = residue:gsub("#quick", "")
+
+            if residue:match("%S") then
+                -- Non-tag content present → this is a body line.
+                header_done = true
+                table.insert(body_lines, line)
+            elseif line == "" then
+                -- Blank line terminates the header and is dropped.
+                header_done = true
+            else
+                -- Pure-metadata line: extract every tag present (one line may
+                -- carry multiple, e.g. "#agent(build) #quick").
+                local agent = line:match("#agent%(([^)]+)%)")
+                if agent then metadata.agent = agent end
+                if line:match("#agentic") then
+                    metadata.mode = "agentic"
+                elseif line:match("#quick") then
+                    metadata.mode = "quick"
+                end
+            end
         end
     end
 

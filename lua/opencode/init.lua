@@ -135,8 +135,8 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         vim.bo[buf].buftype = "acwrite"
         vim.bo[buf].bufhidden = "hide" -- Changed from "wipe" to allow buffer reuse
         vim.bo[buf].filetype = "opencode"
-        vim.bo[buf].swapfile = false -- Prevent swap file creation
-        vim.bo[buf].buflisted = false -- Don't show in buffer list
+        vim.bo[buf].swapfile = false   -- Prevent swap file creation
+        vim.bo[buf].buflisted = false  -- Don't show in buffer list
         -- Use URI scheme to prevent Neovim from treating this as a file path
         -- Check if name is available first to avoid E95 error
         local name_buf = vim.fn.bufnr("opencode://prompt")
@@ -146,7 +146,6 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             -- If another buffer still has this name (shouldn't happen), use a unique name
             vim.api.nvim_buf_set_name(buf, "opencode://prompt-" .. buf)
         end
-
     end
 
     -- Track prompt buffer and window in module state
@@ -183,7 +182,8 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines_to_set)
             if state.draft_cursor then
                 -- Adjust cursor if we inserted a session line
-                local row_offset = (session_to_use and not utils.has_session_reference(table.concat(state.draft_content, "\n"))) and 1 or
+                local row_offset = (session_to_use and not utils.has_session_reference(table.concat(state.draft_content, "\n"))) and
+                    1 or
                     0
                 pcall(vim.api.nvim_win_set_cursor, win, { state.draft_cursor[1] + row_offset, state.draft_cursor[2] })
             end
@@ -284,13 +284,14 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         -- Determine base mode and agent from session or current state
         -- Priority: Session Settings > Current State > Defaults
         local final_mode = session_settings.mode or config.get_project_mode()
-        local final_agent = session_settings.agent or config.state.current_agent or config.state.user_config.agent or "build"
+        local final_agent = session_settings.agent or config.state.current_agent or config.state.user_config.agent or
+        "build"
 
         -- Handle keywords for agent selection and mode switching iteratively
         -- This allows chaining commands like "agentic plan ..." or "plan agentic ..."
         local remaining_content, mode_override, agent_override = utils.parse_mode_agent_keywords(content)
         content = remaining_content
-        
+
         -- Apply overrides if found
         if mode_override then final_mode = mode_override end
         if agent_override then final_agent = agent_override end
@@ -299,23 +300,23 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
         -- This ensures we always use the correct settings even if they haven't "changed"
         -- 1. Update Mode
         if config.get_project_mode() ~= final_mode then
-             config.set_project_mode(final_mode)
-             vim.notify("Switched to " .. final_mode .. " mode", vim.log.levels.INFO)
+            config.set_project_mode(final_mode)
+            vim.notify("Switched to " .. final_mode .. " mode", vim.log.levels.INFO)
         else
-             -- Ensure state is consistent even if logic thinks it's the same
-             config.state.mode = final_mode
+            -- Ensure state is consistent even if logic thinks it's the same
+            config.state.mode = final_mode
         end
 
         -- 2. Update Agent
         config.state.current_agent = final_agent
-        
+
         -- 3. Sync to Server (if in agentic mode)
         if final_mode == "agentic" then
             -- Force model sync
             server.set_server_model(config.state.selected_model)
             -- Force agent sync
             server.set_server_agent(final_agent)
-            
+
             -- If we have a session ID, ensure it's synced too
             if session_in_prompt then
                 server.set_server_session(session_in_prompt)
@@ -324,13 +325,13 @@ function M.OpenCode(initial_prompt, filetype, source_file, session_id_to_continu
 
         -- Prepend agent keyword if it was an override, so runner sees it if needed
         -- (Though runner logic repeats some of this, passing it explicitly via state/server is safer)
-        -- We'll explicitly handle the agent in runner.lua via state/server, but 
+        -- We'll explicitly handle the agent in runner.lua via state/server, but
         -- we can also prepend the tag just in case runner relies on it for something specific.
-        -- Actually, runner.lua checks for #plan/#build tags. 
+        -- Actually, runner.lua checks for #plan/#build tags.
         if agent_override == "plan" then
-             content = "#plan " .. content
+            content = "#plan " .. content
         elseif agent_override == "build" then
-             content = "#build " .. content
+            content = "#build " .. content
         end
 
         state.draft_content = nil
@@ -613,10 +614,10 @@ local function open_session_picker(callback, for_append)
                             session.clear_session()
                             session.start_new_session()
 
-                            -- Do NOT reset to defaults here. 
+                            -- Do NOT reset to defaults here.
                             -- Keep the current mode/agent if the user has changed them via :OCMode or :OCAgent.
                             -- Defaults are handled by config.get_project_mode() and OpenCode() logic if state is nil.
-                            
+
                             vim.notify("Started new session", vim.log.levels.INFO)
                         end
                     end
@@ -789,7 +790,8 @@ function M.SetAgent(agent)
         if success then
             vim.notify("OpenCode agent set to: " .. agent, vim.log.levels.INFO)
         else
-            vim.notify("OpenCode agent set locally to: " .. agent .. " (server update failed: " .. tostring(err) .. ")", vim.log.levels.WARN)
+            vim.notify("OpenCode agent set locally to: " .. agent .. " (server update failed: " .. tostring(err) .. ")",
+                vim.log.levels.WARN)
         end
     end)
 end

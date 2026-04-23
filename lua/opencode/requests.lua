@@ -141,9 +141,12 @@ function M.cancel_all_requests()
         M.cancel_request(id)
         count = count + 1
     end
+    -- Drop any pending requests too — a "cancel all" that leaves the queue
+    -- intact would surprise the user when queued prompts fire moments later.
+    M.clear_queue()
     -- Resume queue processing
     M.queue_suspended = false
-    -- Always reset busy state to allow queue processing
+    -- Always reset busy state
     -- This handles edge cases where is_busy is true but no requests were registered
     M.set_busy(false)
     return count

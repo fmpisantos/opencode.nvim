@@ -319,7 +319,7 @@ function M.list_sessions(server_url, callback)
 end
 
 --- Get or create a session for use with HTTP API
---- Returns an existing session if one is active, or creates a new one
+--- Uses the provided session ID if given, otherwise creates a new one
 ---@param server_url string Server base URL
 ---@param opts? table { session_id?: string, title?: string }
 ---@param callback function Called with (success, session_id_or_error)
@@ -329,13 +329,6 @@ function M.get_or_create_session(server_url, opts, callback)
     -- If we already have a session ID, use it
     if opts.session_id then
         callback(true, opts.session_id)
-        return
-    end
-
-    -- Check if we have a session in server state
-    local srv = M.get_server_for_cwd()
-    if srv and srv.session_id then
-        callback(true, srv.session_id)
         return
     end
 
