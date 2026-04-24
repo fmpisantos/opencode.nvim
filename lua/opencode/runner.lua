@@ -314,6 +314,11 @@ function M.run_opencode(prompt, files, source_file)
         -- State for streaming updates
         local json_lines = {}
         local stderr_output = {}
+        -- vim.system delivers stdout/stderr in arbitrary-size chunks that are
+        -- NOT aligned to line boundaries. These hold the incomplete tail of
+        -- the last chunk so we don't drop the fragment that crosses a boundary.
+        local stdout_partial = ""
+        local stderr_partial = ""
         local system_obj = nil
         local is_running = true
         local run_start_time = nil
@@ -489,8 +494,18 @@ function M.run_opencode(prompt, files, source_file)
                 stdout = function(_, data)
                     if data then
                         vim.schedule(function()
-                            -- Parse incoming data line by line
-                            for line in data:gmatch("[^\r\n]+") do
+                            local combined = stdout_partial .. data
+                            local last_nl = combined:find("[\r\n][^\r\n]*$")
+                            local complete, tail
+                            if last_nl then
+                                complete = combined:sub(1, last_nl)
+                                tail = combined:sub(last_nl + 1)
+                            else
+                                complete = ""
+                                tail = combined
+                            end
+                            stdout_partial = tail
+                            for line in complete:gmatch("[^\r\n]+") do
                                 table.insert(json_lines, line)
                             end
                             update_display()
@@ -500,7 +515,18 @@ function M.run_opencode(prompt, files, source_file)
                 stderr = function(_, data)
                     if data then
                         vim.schedule(function()
-                            for line in data:gmatch("[^\r\n]+") do
+                            local combined = stderr_partial .. data
+                            local last_nl = combined:find("[\r\n][^\r\n]*$")
+                            local complete, tail
+                            if last_nl then
+                                complete = combined:sub(1, last_nl)
+                                tail = combined:sub(last_nl + 1)
+                            else
+                                complete = ""
+                                tail = combined
+                            end
+                            stderr_partial = tail
+                            for line in complete:gmatch("[^\r\n]+") do
                                 table.insert(stderr_output, line)
                             end
                         end)
@@ -512,6 +538,17 @@ function M.run_opencode(prompt, files, source_file)
                     if update_timer then
                         vim.fn.timer_stop(update_timer)
                         update_timer = nil
+                    end
+
+                    -- Flush any trailing partial line that wasn't terminated
+                    -- by a newline before the process exited.
+                    if stdout_partial ~= "" then
+                        table.insert(json_lines, stdout_partial)
+                        stdout_partial = ""
+                    end
+                    if stderr_partial ~= "" then
+                        table.insert(stderr_output, stderr_partial)
+                        stderr_partial = ""
                     end
 
                     -- Unregister the request
@@ -902,6 +939,36 @@ function M.run_opencode(prompt, files, source_file)
             local active_question_id = nil
             local awaiting_user = false
 
+            -- After a user replies to a permission/question prompt we clear
+            -- the local pending_* field ourselves instead of waiting for the
+            -- server to echo back a `permission.replied` / `question.replied`
+            -- event. Without this, if that echo never arrives (or its
+            -- requestID doesn't match), `try_finalize` stays blocked forever
+            -- and the spinner runs until the hard timeout.
+            local function clear_pending_permission(id)
+                if sse_state.pending_permission and sse_state.pending_permission.id == id then
+                    sse_state.pending_permission = nil
+                end
+                if idle_after_response and is_running
+                    and not awaiting_user
+                    and not sse_state.pending_permission
+                    and not sse_state.pending_question then
+                    finalize()
+                end
+            end
+
+            local function clear_pending_question(id)
+                if sse_state.pending_question and sse_state.pending_question.id == id then
+                    sse_state.pending_question = nil
+                end
+                if idle_after_response and is_running
+                    and not awaiting_user
+                    and not sse_state.pending_permission
+                    and not sse_state.pending_question then
+                    finalize()
+                end
+            end
+
             local function handle_pending_prompts()
                 -- Permission prompt
                 local perm = sse_state.pending_permission
@@ -921,6 +988,7 @@ function M.run_opencode(prompt, files, source_file)
                                         vim.notify("Permission reply failed: " .. tostring(err),
                                             vim.log.levels.ERROR)
                                     end
+                                    clear_pending_permission(perm.id)
                                     if is_running then update_display() end
                                 end)
                             end)
@@ -943,6 +1011,7 @@ function M.run_opencode(prompt, files, source_file)
                                             vim.notify("Question reject failed: " .. tostring(err),
                                                 vim.log.levels.ERROR)
                                         end
+                                        clear_pending_question(q.id)
                                         if is_running then update_display() end
                                     end)
                                 end)
@@ -955,6 +1024,7 @@ function M.run_opencode(prompt, files, source_file)
                                         vim.notify("Question reply failed: " .. tostring(err),
                                             vim.log.levels.ERROR)
                                     end
+                                    clear_pending_question(q.id)
                                     if is_running then update_display() end
                                 end)
                             end)

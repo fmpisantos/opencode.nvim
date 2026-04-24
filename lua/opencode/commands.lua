@@ -99,6 +99,23 @@ local function setup_commands(opencode)
         opencode.ToggleCLI()
     end, { nargs = 0 })
 
+    -- Open opencode TUI in a terminal, replacing the OCCLI pane
+    local function open_opencode_tui()
+        local session = require("opencode.session")
+        local session_id = session.get_session_from_current_buffer()
+        if not session_id then
+            vim.notify("Run :OCOpen from an OCCLI response buffer with an active session",
+                vim.log.levels.ERROR)
+            return
+        end
+        vim.cmd("terminal opencode -s " .. vim.fn.shellescape(session_id))
+        vim.cmd("startinsert")
+    end
+    vim.api.nvim_create_user_command("OpenCodeOpen", open_opencode_tui,
+        { nargs = 0, desc = "Open opencode TUI for the current OCCLI session" })
+    vim.api.nvim_create_user_command("OCOpen", open_opencode_tui,
+        { nargs = 0, desc = "Open opencode TUI for the current OCCLI session" })
+
     -- Sessions
     vim.api.nvim_create_user_command("OpenCodeSessions", function()
         opencode.SelectSession()
